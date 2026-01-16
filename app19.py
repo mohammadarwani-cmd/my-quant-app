@@ -106,36 +106,18 @@ def get_all_etf_list():
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600*4)
-def download_market_data(codes_list):
+def download_market_data(codes_list, end_date_str):
     """
-    智能数据下载：根据当前北京时间判断是否已收盘
+    数据下载核心：只负责下载，不负责UI交互和时间判断，确保Cache稳定
     """
-    # 智能时间判定 (Smart Timing)
-    # 获取UTC时间并转换为北京时间 (UTC+8)
-    utc_now = datetime.now(timezone.utc)
-    beijing_now = utc_now + timedelta(hours=8)
-    
-    # 判定截止日期
-    if beijing_now.hour >= 15:
-        # 下午3点后，尝试获取今日数据
-        target_date = beijing_now
-        status_msg = f"当前北京时间 {beijing_now.strftime('%H:%M')} (已收盘)，获取截至今日数据"
-    else:
-        # 下午3点前，仅获取到昨日
-        target_date = beijing_now - timedelta(days=1)
-        status_msg = f"当前北京时间 {beijing_now.strftime('%H:%M')} (盘中)，获取截至昨日数据"
-        
     start_str = '20150101' 
-    end_str = target_date.strftime('%Y%m%d')
+    # end_str 现在由外部传入，这非常重要，因为这决定了Cache key
     
     price_dict = {}
     name_map = {}
     
     # 获取名称映射
     etf_list = get_all_etf_list()
-    
-    # 显示状态提示
-    st.toast(status_msg, icon="🕒")
     
     for code in codes_list:
         name = code
@@ -149,7 +131,7 @@ def download_market_data(codes_list):
         name_map[code] = name
         
         try:
-            df = ak.fund_etf_hist_em(symbol=code, period="daily", start_date=start_str, end_date=end_str, adjust="qfq")
+            df = ak.fund_etf_hist_em(symbol=code, period="daily", start_date=start_str, end_date=end_date_str, adjust="qfq")
             if not df.empty:
                 df['日期'] = pd.to_datetime(df['日期'])
                 df.set_index('日期', inplace=True)
@@ -377,9 +359,28 @@ def main():
         st.stop()
         
     # 1. 数据加载
+    # 智能时间判定 (Smart Timing) - 移至 Main 函数以避免 Cache Error
+    utc_now = datetime.now(timezone.utc)
+    beijing_now = utc_now + timedelta(hours=8)
+    
+    if beijing_now.hour >= 15:
+        # 下午3点后，尝试获取今日数据
+        target_date = beijing_now
+        status_msg = f"当前北京时间 {beijing_now.strftime('%H:%M')} (已收盘)，获取截至今日数据"
+    else:
+        # 下午3点前，仅获取到昨日
+        target_date = beijing_now - timedelta(days=1)
+        status_msg = f"当前北京时间 {beijing_now.strftime('%H:%M')} (盘中)，获取截至昨日数据"
+    
+    # 构造截止日期字符串，这会作为Cache Key的一部分
+    end_date_str = target_date.strftime('%Y%m%d')
+
     with st.spinner("正在接入市场数据终端 (Smart-Link)..."):
-        # 下载全量数据 (为了计算指标，需要比选定开始时间更早的数据)
-        raw_data, name_map = download_market_data(selected_codes)
+        # 传入 end_date_str，确保每天15点后缓存自动更新
+        raw_data, name_map = download_market_data(selected_codes, end_date_str)
+        
+    # UI 反馈放在 Spinner 之后
+    st.toast(status_msg, icon="🕒")
         
     if raw_data is None:
         st.error("数据获取失败，请检查网络或代码有效性。")
