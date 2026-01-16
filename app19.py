@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, timezone
+import time
+from scipy import stats
 
 # ==========================================
 # 1. 投行级页面配置 & CSS样式
@@ -67,12 +69,15 @@ st.markdown("""
         box-shadow: 0 4px 15px rgba(30, 60, 114, 0.2);
     }
     
-    /* 年份收益表格样式 */
+    /* 优化表格样式 */
     .dataframe {
-        font-size: 14px !important;
+        font-size: 13px !important;
     }
 </style>
 """, unsafe_allow_html=True)
+
+# 全局常量配置
+TRANSACTION_COST = 0.0001  # 万分之一
 
 # 默认标的池
 DEFAULT_CODES = ["518880", "588000", "513100", "510180"]
@@ -108,15 +113,12 @@ def get_all_etf_list():
 @st.cache_data(ttl=3600*4)
 def download_market_data(codes_list, end_date_str):
     """
-    数据下载核心：只负责下载，不负责UI交互和时间判断，确保Cache稳定
+    数据下载核心
     """
     start_str = '20150101' 
-    # end_str 现在由外部传入，这非常重要，因为这决定了Cache key
-    
     price_dict = {}
     name_map = {}
     
-    # 获取名称映射
     etf_list = get_all_etf_list()
     
     for code in codes_list:
@@ -152,7 +154,7 @@ def download_market_data(codes_list, end_date_str):
     return data, name_map
 
 # ==========================================
-# 3. 策略内核 (Strategy Core)
+# 3. 策略内核 (Strategy Core) - 升级版
 # ==========================================
 
 def calculate_momentum(data, lookback, smooth):
@@ -161,10 +163,11 @@ def calculate_momentum(data, lookback, smooth):
         mom = mom.rolling(smooth).mean()
     return mom
 
-def fast_backtest_vectorized(daily_ret, mom_df, threshold):
+def fast_backtest_vectorized(daily_ret, mom_df, threshold, cost_rate=0.0001, allow_cash=True):
     """
-    向量化快速回测 (仅用于参数优化的净值计算，假设一次性投入)
+    向量化快速回测 (含交易成本 & 绝对动量避险)
     """
+    # 信号生成: T-1的数据决定T日
     signal_mom = mom_df.shift(1)
     
     n_days, n_assets = daily_ret.shape
@@ -172,26 +175,62 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold):
     p_mom = signal_mom.values
     
     strategy_ret = np.zeros(n_days)
-    curr_idx = -1 
+    curr_idx = -2 # -2: 初始状态, -1: 空仓(Cash), 0~N: 资产索引
+    
+    trade_count = 0
     
     for i in range(n_days):
         row_mom = p_mom[i]
-        if np.isnan(row_mom).all(): continue
+        
+        # 跳过无效数据
+        if np.isnan(row_mom).all(): 
+            continue
             
+        # 处理NaN为负无穷
         clean_mom = np.nan_to_num(row_mom, nan=-np.inf)
+        
+        # 1. 找到最好的资产
         best_idx = np.argmax(clean_mom)
         best_val = clean_mom[best_idx]
         
-        if curr_idx == -1:
-            if best_val > -np.inf: curr_idx = best_idx
-        else:
-            curr_val = clean_mom[curr_idx]
-            if best_idx != curr_idx:
-                if best_val > curr_val + threshold:
-                    curr_idx = best_idx
+        target_idx = curr_idx
         
-        if curr_idx != -1:
-            strategy_ret[i] = p_ret[i, curr_idx]
+        # 2. 绝对动量判定 (避险)
+        if allow_cash and best_val < 0:
+            target_idx = -1 # 强制空仓
+        else:
+            # 3. 相对动量判定 (轮动)
+            if curr_idx == -2: # 刚启动
+                if best_val > -np.inf: 
+                    target_idx = best_idx
+            elif curr_idx == -1: # 当前空仓
+                if best_val > 0: # 只有大于0才入场
+                    target_idx = best_idx
+            else: # 当前持有资产
+                # 如果持仓资产数据缺失(退市/停牌)，强制换到best
+                curr_val = clean_mom[curr_idx]
+                if best_idx != curr_idx:
+                    if best_val > curr_val + threshold:
+                        target_idx = best_idx
+        
+        # 4. 结算收益与成本
+        r_day = 0.0
+        
+        # 计算交易成本
+        if target_idx != curr_idx:
+            # 只要仓位变动(包括开仓、平仓、换仓)，都扣除一次成本
+            # 初始建仓也扣
+            if curr_idx != -2:
+                r_day -= cost_rate
+                trade_count += 1
+            curr_idx = target_idx
+            
+        # 计算持仓收益
+        if curr_idx >= 0:
+            r_day += p_ret[i, curr_idx]
+        # else: 空仓收益为0
+            
+        strategy_ret[i] = r_day
             
     equity_curve = (1 + strategy_ret).cumprod()
     total_ret = equity_curve[-1] - 1
@@ -200,32 +239,38 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold):
     drawdown = (equity_curve - cummax) / cummax
     max_dd = drawdown.min()
     
-    return total_ret, max_dd, equity_curve
+    return total_ret, max_dd, equity_curve, trade_count
 
 # ==========================================
 # 4. 分析师工具箱 (Analyst Toolkit)
 # ==========================================
 
-def calculate_pro_metrics(equity_curve, days_count):
+def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
     """
-    计算投行级策略指标
+    计算投行级策略指标 (含Alpha/Beta)
     """
     if len(equity_curve) < 2: return {}
     
+    # 转换为Series
+    s_eq = pd.Series(equity_curve)
+    s_bm = pd.Series(benchmark_curve) if len(benchmark_curve) == len(equity_curve) else None
+    
     # 日收益率
-    daily_ret = pd.Series(equity_curve).pct_change().fillna(0)
+    daily_ret = s_eq.pct_change().fillna(0)
+    bm_ret = s_bm.pct_change().fillna(0) if s_bm is not None else None
+    
+    days = len(equity_curve)
     
     # 1. 基础收益
-    total_ret = equity_curve[-1] / equity_curve[0] - 1
+    total_ret = equity_curve[-1] - 1
     
     # 2. 年化收益
-    if days_count == 0: days_count = len(equity_curve)
-    ann_ret = (1 + total_ret) ** (252 / days_count) - 1
+    ann_ret = (1 + total_ret) ** (252 / days) - 1
     
     # 3. 年化波动率
     ann_vol = daily_ret.std() * np.sqrt(252)
     
-    # 4. 夏普比率
+    # 4. 夏普比率 (无风险利率=3%)
     rf = 0.03
     sharpe = (ann_ret - rf) / (ann_vol + 1e-9)
     
@@ -237,26 +282,36 @@ def calculate_pro_metrics(equity_curve, days_count):
     # 6. 卡玛比率
     calmar = ann_ret / (abs(max_dd) + 1e-9)
     
+    # 7. Alpha & Beta (相对于等权基准)
+    alpha, beta = 0.0, 0.0
+    if bm_ret is not None and len(bm_ret) > 10:
+        try:
+            # 线性回归
+            slope, intercept, _, _, _ = stats.linregress(bm_ret.values[1:], daily_ret.values[1:])
+            beta = slope
+            # Alpha需要年化: (日Alpha * 252)
+            alpha = intercept * 252
+        except:
+            pass
+            
     return {
         "Total Return": total_ret,
         "CAGR": ann_ret,
         "Volatility": ann_vol,
         "Max Drawdown": max_dd,
         "Sharpe Ratio": sharpe,
-        "Calmar Ratio": calmar
+        "Calmar Ratio": calmar,
+        "Alpha": alpha,
+        "Beta": beta,
+        "Trades": trade_count
     }
 
 def optimize_parameters(data):
     """
-    精确参数网格搜索引擎 (Exact Grid Search)
-    Lookback: 20-30 (Step 1)
-    Smooth: 1-5 (Step 1)
-    Threshold: 0-0.012 (Step 0.001)
+    优化引擎 v2.0: 包含成本与避险逻辑
     """
-    lookbacks = range(20, 31, 1) # 20 到 30
-    smooths = range(1, 6, 1)     # 1 到 5
-    
-    # 使用 np.arange 生成浮点数序列，注意终点不包含，所以设为 0.013
+    lookbacks = range(20, 31, 1)
+    smooths = range(1, 6, 1)    
     thresholds = np.arange(0.0, 0.013, 0.001) 
     
     daily_ret = data.pct_change().fillna(0)
@@ -264,8 +319,7 @@ def optimize_parameters(data):
     
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
     
-    # 进度显示
-    progress_text = "核心参数空间遍历中 (共 {} 组组合)...".format(total_iters)
+    progress_text = "多维参数空间遍历中 (含交易摩擦模拟)...".format(total_iters)
     my_bar = st.progress(0, text=progress_text)
     
     idx = 0
@@ -274,18 +328,18 @@ def optimize_parameters(data):
         for sm in smooths:
             mom = calculate_momentum(data, lb, sm)
             for th in thresholds:
-                # 优化时使用向量化回测，速度最快
-                ret, dd, _ = fast_backtest_vectorized(daily_ret, mom, th)
-                # 防止除零
-                score = ret / (abs(dd) + 0.01) 
-                results.append([lb, sm, th, ret, dd, score])
+                # 启用成本和避险逻辑
+                ret, dd, _, count = fast_backtest_vectorized(daily_ret, mom, th, cost_rate=TRANSACTION_COST, allow_cash=True)
+                
+                score = ret / (abs(dd) + 0.05) # 增加分母惩罚项，避免极小回撤导致的超高分
+                results.append([lb, sm, th, ret, dd, count, score])
                 
                 idx += 1
-                if idx % 50 == 0:
+                if idx % 100 == 0:
                     my_bar.progress(min(idx / total_iters, 1.0), text=f"{progress_text} {idx}/{total_iters}")
                     
     my_bar.empty()
-    df_res = pd.DataFrame(results, columns=['周期', '平滑', '阈值', '累计收益', '最大回撤', '得分'])
+    df_res = pd.DataFrame(results, columns=['周期', '平滑', '阈值', '累计收益', '最大回撤', '调仓次数', '得分'])
     return df_res
 
 # ==========================================
@@ -294,13 +348,12 @@ def optimize_parameters(data):
 
 def main():
     if 'params' not in st.session_state:
-        st.session_state.params = {'lookback': 20, 'smooth': 3, 'threshold': 0.005}
+        st.session_state.params = {'lookback': 25, 'smooth': 3, 'threshold': 0.005} # 调整默认值更稳健
 
     # --- 侧边栏 ---
     with st.sidebar:
         st.title("🎛️ 策略控制台")
         
-        # 1. 资产池
         st.subheader("1. 资产池配置")
         all_etfs = get_all_etf_list()
         options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
@@ -310,10 +363,8 @@ def main():
         
         st.divider()
         
-        # 2. 资金管理实验室
         st.subheader("2. 资金管理实验室")
         
-        # A. 时间段选择
         date_mode = st.radio("回测区间", ["全历史 (2015至今)", "自定义区间"], index=0)
         start_date = datetime(2015, 1, 1)
         end_date = datetime.now()
@@ -322,11 +373,9 @@ def main():
             c1, c2 = st.columns(2)
             start_date = c1.date_input("开始日期", datetime(2019, 1, 1))
             end_date = c2.date_input("结束日期", datetime.now())
-            # 转换为datetime
             start_date = datetime.combine(start_date, datetime.min.time())
             end_date = datetime.combine(end_date, datetime.min.time())
 
-        # B. 投资模式
         invest_mode = st.radio("投资模式", ["一次性投入 (Lump Sum)", "定期定额 (SIP)"], index=0)
         
         initial_capital = 100000.0
@@ -337,17 +386,20 @@ def main():
             initial_capital = st.number_input("初始本金", value=100000.0, step=10000.0)
         else:
             c1, c2 = st.columns(2)
-            initial_capital = c1.number_input("初始底仓", value=10000.0, step=1000.0, help="开始时投入的第一笔资金")
+            initial_capital = c1.number_input("初始底仓", value=10000.0, step=1000.0)
             sip_amount = c2.number_input("定投金额", value=2000.0, step=500.0)
             sip_freq = st.selectbox("定投频率", ["每月 (Monthly)", "每周 (Weekly)"], index=0)
 
         st.divider()
         
-        # 3. 策略参数
         st.subheader("3. 策略内核参数")
-        p_lookback = st.slider("动量周期", 5, 60, st.session_state.params['lookback'])
-        p_smooth = st.slider("平滑窗口", 1, 10, st.session_state.params['smooth'])
-        p_threshold = st.number_input("换仓阈值", 0.0, 0.05, st.session_state.params['threshold'], step=0.001, format="%.3f")
+        p_lookback = st.slider("动量周期 (Lookback)", 5, 60, st.session_state.params['lookback'])
+        p_smooth = st.slider("平滑窗口 (Smooth)", 1, 10, st.session_state.params['smooth'])
+        p_threshold = st.number_input("换仓阈值 (Threshold)", 0.0, 0.05, st.session_state.params['threshold'], step=0.001, format="%.3f")
+        
+        # 实时显示成本提示
+        st.caption(f"ℹ️ 当前交易费率设定: {TRANSACTION_COST*10000:.0f}‱ (万一)")
+        st.caption(f"🛡️ 绝对动量避险: 已启用 (动量<0时空仓)")
         
         st.session_state.params.update({'lookback': p_lookback, 'smooth': p_smooth, 'threshold': p_threshold})
 
@@ -359,41 +411,32 @@ def main():
         st.stop()
         
     # 1. 数据加载
-    # 智能时间判定 (Smart Timing) - 移至 Main 函数以避免 Cache Error
     utc_now = datetime.now(timezone.utc)
     beijing_now = utc_now + timedelta(hours=8)
     
     if beijing_now.hour >= 15:
-        # 下午3点后，尝试获取今日数据
         target_date = beijing_now
         status_msg = f"当前北京时间 {beijing_now.strftime('%H:%M')} (已收盘)，获取截至今日数据"
     else:
-        # 下午3点前，仅获取到昨日
         target_date = beijing_now - timedelta(days=1)
         status_msg = f"当前北京时间 {beijing_now.strftime('%H:%M')} (盘中)，获取截至昨日数据"
     
-    # 构造截止日期字符串，这会作为Cache Key的一部分
     end_date_str = target_date.strftime('%Y%m%d')
 
     with st.spinner("正在接入市场数据终端 (Smart-Link)..."):
-        # 传入 end_date_str，确保每天15点后缓存自动更新
         raw_data, name_map = download_market_data(selected_codes, end_date_str)
         
-    # UI 反馈放在 Spinner 之后
     st.toast(status_msg, icon="🕒")
         
     if raw_data is None:
         st.error("数据获取失败，请检查网络或代码有效性。")
         st.stop()
 
-    # 2. 策略计算 (含定投逻辑)
-    # 先计算全量动量，防止切片导致开头无数据
+    # 2. 策略计算
     daily_ret_all = raw_data.pct_change().fillna(0)
     mom_all = calculate_momentum(raw_data, p_lookback, p_smooth)
     
-    # 时间切片：根据用户选择截取回测段
     mask = (raw_data.index >= start_date) & (raw_data.index <= end_date)
-    # 如果筛选后为空，提示
     if not mask.any():
         st.error("选定区间内无有效交易数据，请调整日期。")
         st.stop()
@@ -402,186 +445,244 @@ def main():
     sliced_mom = mom_all.loc[mask] 
     sliced_ret = daily_ret_all.loc[mask]
     
-    # 详细逐日回测循环 (支持定投)
-    signal_mom = sliced_mom.shift(1) # T-1日的信号
+    # === 详细逐日回测循环 (含成本与避险) ===
+    signal_mom = sliced_mom.shift(1) # T-1
     
     dates = sliced_ret.index
     holdings = []
     
-    # 资金账户
     cash = initial_capital
     share_val = 0.0
     total_assets_curve = []
-    total_invested_curve = [] # 记录投入本金
+    total_invested_curve = []
     total_invested = initial_capital
     
-    curr_hold = None # 当前持有的资产代码
+    curr_hold = None # None表示初始状态
+    trade_count_real = 0 # 实际调仓次数统计
     
-    # 定投辅助
     last_sip_date = dates[0]
     
     for i, date in enumerate(dates):
-        # --- 1. 定投逻辑 ---
+        # A. 定投逻辑
         if invest_mode == "定期定额 (SIP)" and i > 0:
             is_sip_day = False
             if sip_freq.startswith("每月"):
-                if date.month != last_sip_date.month:
-                    is_sip_day = True
+                if date.month != last_sip_date.month: is_sip_day = True
             elif sip_freq.startswith("每周"):
-                if date.weekday() == 0 and last_sip_date.weekday() != 0: 
-                    is_sip_day = True
+                if date.weekday() == 0 and last_sip_date.weekday() != 0: is_sip_day = True
             
             if is_sip_day:
                 cash += sip_amount
                 total_invested += sip_amount
                 last_sip_date = date
         
-        # --- 2. 信号与换仓逻辑 ---
+        # B. 信号与换仓逻辑
         row = signal_mom.loc[date]
         r_today = sliced_ret.loc[date]
         
         target = curr_hold
+        is_trade_today = False
         
-        # 只有当有有效信号时才尝试换仓
         if not row.isna().all():
-            best_asset = row.idxmax()
-            best_score = row.max()
+            clean_row = row.fillna(-np.inf)
+            best_asset = clean_row.idxmax()
+            best_score = clean_row.max()
             
-            if curr_hold is None:
-                target = best_asset
+            # --- 绝对动量避险逻辑 ---
+            if best_score < 0:
+                target = 'Cash'
             else:
-                curr_score = row.get(curr_hold, -np.inf)
-                if best_asset != curr_hold:
-                    if best_score > curr_score + p_threshold:
-                        target = best_asset
+                # 相对动量轮动
+                if curr_hold is None or curr_hold == 'Cash':
+                    target = best_asset # 空仓转多仓
+                else:
+                    curr_score = clean_row.get(curr_hold, -np.inf)
+                    if best_asset != curr_hold:
+                        if best_score > curr_score + p_threshold:
+                            target = best_asset
         
-        # --- 3. 结算当日收益 ---
+        # C. 结算与成本扣除
+        
+        # 1. 计算日内持仓涨跌
         day_return = 0.0
-        if curr_hold and curr_hold in r_today:
+        if curr_hold and curr_hold != 'Cash' and curr_hold in r_today:
              day_return = r_today[curr_hold]
         
-        # 更新资产
         share_val = share_val * (1 + day_return)
         
-        if target:
-            # 资金入场
-            share_val += cash 
-            cash = 0.0
-        
+        # 2. 执行换仓
+        if target != curr_hold:
+            # 发生交易 (包括 资产A->资产B, 资产->Cash, Cash->资产)
+            if curr_hold is not None: # 初始建仓不算换仓成本的话，可以加判断。这里假设建仓也算。
+                # 扣除成本 (基于当前总权益)
+                total_equity_temp = share_val + cash
+                cost = total_equity_temp * TRANSACTION_COST
+                
+                # 简单处理：从现金或市值中扣除
+                if cash >= cost:
+                    cash -= cost
+                else:
+                    share_val -= cost
+                
+                trade_count_real += 1
+                is_trade_today = True
+
+            # 资产转移逻辑
+            if target == 'Cash':
+                # 卖出所有变为现金
+                cash += share_val
+                share_val = 0.0
+            else:
+                # 变为特定资产 (Cash -> Asset 或 Asset A -> Asset B)
+                # 这里的逻辑是全仓切换：所有钱都变成 Target
+                total_money = share_val + cash
+                share_val = total_money
+                cash = 0.0
+                
+            curr_hold = target
+
         total_equity = share_val + cash
         
         total_assets_curve.append(total_equity)
         total_invested_curve.append(total_invested)
         holdings.append(target if target else "Cash")
-        curr_hold = target
 
-    # 结果集整理
+    # 结果集
     df_res = pd.DataFrame({
         '总资产': total_assets_curve,
         '投入本金': total_invested_curve,
         '持仓': holdings,
-        # '日收益率': sliced_ret.mean(axis=1) # 移除不必要的平均值
     }, index=dates)
     
-    # --- 新增功能：生成"全市场表现"列 ---
-    # 格式化所有标的当日涨跌幅为字符串: "标的A: +1.2% | 标的B: -0.5%"
-    
+    # 格式化市场表现
     def format_market_perf(row, n_map):
         items = []
-        # 按涨跌幅排序
         sorted_items = row.sort_values(ascending=False)
         for code, val in sorted_items.items():
-            name = n_map.get(code, code)
-            # 简化名称，去掉(xxx)
-            short_name = name.split("(")[0]
-            items.append(f"{short_name}: {val:+.2%}")
+            name = n_map.get(code, code).split("(")[0]
+            items.append(f"{name}: {val:+.2%}")
         return " | ".join(items)
 
-    df_res['全市场表现 (Monitor)'] = sliced_ret.apply(lambda r: format_market_perf(r, name_map), axis=1)
-
-    # 重新计算策略日收益率 (基于净值)
+    df_res['全市场表现'] = sliced_ret.apply(lambda r: format_market_perf(r, name_map), axis=1)
     df_res['策略日收益'] = df_res['总资产'].pct_change().fillna(0)
     
-    # === 引入单位净值计算 (Unit NAV) ===
-    # 快速获取 NAV 曲线
-    _, _, nav_series = fast_backtest_vectorized(sliced_ret, sliced_mom, p_threshold)
+    # === 策略净值 (Unit NAV) 计算 - 含成本 ===
+    # 为了准确对比，使用向量化函数重算一遍净值曲线
+    _, _, nav_series, _ = fast_backtest_vectorized(sliced_ret, sliced_mom, p_threshold, cost_rate=TRANSACTION_COST, allow_cash=True)
     df_res['策略净值'] = nav_series
+    
+    # === 计算 Benchmark (等权策略) ===
+    # 简单构建一个不择时、等权持有的基准
+    bm_daily_ret = sliced_ret.mean(axis=1)
+    bm_curve = (1 + bm_daily_ret).cumprod()
     
     # 3. 今日信号面板
     latest_date = sliced_data.index[-1]
     last_hold = holdings[-1]
-    # 使用mom_all获取最新，且只获取有数据的列
     latest_mom = mom_all.iloc[-1].dropna().sort_values(ascending=False)
     
     col_sig1, col_sig2 = st.columns([2, 1])
     with col_sig1:
+        hold_name = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '🛡️ 空仓避险 (Cash)'
         st.markdown(f"""
         <div class="signal-banner">
-            <h3 style="margin:0">📌 当前持仓建议: {name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '空仓观望'}</h3>
+            <h3 style="margin:0">📌 当前持仓建议: {hold_name}</h3>
             <div style="margin-top:10px; opacity:0.9">
-                数据截止: {latest_date.strftime('%Y-%m-%d')} | 策略周期: {p_lookback}日 | 阈值: {p_threshold:.1%}
+                数据截止: {latest_date.strftime('%Y-%m-%d')} | 避险模式: 开启 | 交易费率: 万一
             </div>
         </div>
         """, unsafe_allow_html=True)
     with col_sig2:
         st.markdown("**🏆 实时动量排名**")
         if not latest_mom.empty:
+            top_score = latest_mom.iloc[0]
+            if top_score < 0:
+                 st.error(f"⚠️ 市场全线转弱 (最高分 {top_score:.2%} < 0)，触发避险")
             for i, (asset, score) in enumerate(latest_mom.head(3).items()):
                 display_name = name_map.get(asset, asset)
-                st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
-        else:
-            st.warning("暂无有效动量数据")
+                icon = "🔴" if score < 0 else "🟢"
+                st.markdown(f"{i+1}. {icon} **{display_name}**: `{score:.2%}`")
 
-    # 4. 优化引擎
+    # 4. 优化引擎 (v2.1 含热力图)
     with st.expander("🛠️ 策略参数优化引擎 (Smart Optimizer)", expanded=False):
-        st.info("💡 已启用高精度网格搜索：Lookback[20-30], Smooth[1-5], Threshold[0-0.012]")
+        c_opt1, c_opt2 = st.columns([1, 2])
+        with c_opt1:
+            opt_mode = st.radio("优化数据源", ["全历史数据", "当前选定区间"], index=0)
+        
+        data_to_opt = raw_data if opt_mode == "全历史数据" else sliced_data
+        
         if st.button("运行参数寻优"):
-            with st.spinner("AI正在进行高精度参数遍历..."):
-                opt_df = optimize_parameters(raw_data)
+            t0 = time.time()
+            with st.spinner("正在进行多维参数回测 (含成本与避险)..."):
+                opt_df = optimize_parameters(data_to_opt)
                 best_ret = opt_df.loc[opt_df['累计收益'].idxmax()]
                 best_calmar = opt_df.loc[opt_df['得分'].idxmax()]
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.code(f"🔥 进攻型 (Ret {best_ret['累计收益']:.1%})\nLookback: {int(best_ret['周期'])}, Smooth: {int(best_ret['平滑'])}, Thres: {best_ret['阈值']:.3f}")
-                with c2:
-                    st.code(f"🛡️ 防御型 (Score {best_ret['得分']:.2f})\nLookback: {int(best_calmar['周期'])}, Smooth: {int(best_calmar['平滑'])}, Thres: {best_calmar['阈值']:.3f}")
+            
+            st.success(f"✅ 优化完成 ({time.time()-t0:.1f}s)")
+            
+            c1, c2, c3 = st.columns([1, 1, 2])
+            with c1:
+                st.info("🔥 进攻型参数")
+                st.write(f"Lookback: {int(best_ret['周期'])}")
+                st.write(f"Threshold: {best_ret['阈值']:.3f}")
+                st.metric("累计收益", f"{best_ret['累计收益']:.1%}", f"换手: {int(best_ret['调仓次数'])}次")
+            with c2:
+                st.success("🛡️ 防御型参数")
+                st.write(f"Lookback: {int(best_calmar['周期'])}")
+                st.write(f"Threshold: {best_calmar['阈值']:.3f}")
+                st.metric("综合得分", f"{best_calmar['得分']:.2f}", f"回撤: {best_calmar['最大回撤']:.1%}")
+            
+            with c3:
+                st.markdown("**🌡️ 参数热力图 (周期 vs 阈值)**")
+                # 聚合数据画热力图
+                pivot_df = opt_df.pivot_table(index='阈值', columns='周期', values='得分', aggfunc='mean')
+                fig_heat = px.imshow(pivot_df, labels=dict(x="Lookback", y="Threshold", color="Score"),
+                                   color_continuous_scale="RdBu_r", aspect="auto", origin='lower')
+                fig_heat.update_layout(height=250, margin=dict(l=0, r=0, t=0, b=0))
+                st.plotly_chart(fig_heat, use_container_width=True)
 
     st.divider()
     
     # 5. 核心报表区
-    st.subheader("📊 账户深度分析")
+    st.subheader("📊 账户深度分析 (Analyst Report)")
     
-    # 核心指标计算
-    # 账户总收益率
+    # 核心指标
     account_ret = df_res['总资产'].iloc[-1] / df_res['投入本金'].iloc[-1] - 1
     account_profit = df_res['总资产'].iloc[-1] - df_res['投入本金'].iloc[-1]
     
-    # 策略表现指标 (基于净值)
-    strat_metrics = calculate_pro_metrics(df_res['策略净值'].values, len(df_res))
+    # 策略vs基准
+    strat_metrics = calculate_pro_metrics(df_res['策略净值'].values, bm_curve.values, trade_count_real)
     
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1: st.markdown(metric_html("账户总资产", f"¥{df_res['总资产'].iloc[-1]:,.0f}", f"本金: ¥{df_res['投入本金'].iloc[-1]:,.0f}"), unsafe_allow_html=True)
-    with m2: st.markdown(metric_html("账户累计收益", f"{account_ret:+.2%}", f"盈亏: ¥{account_profit:+,.0f}", color="#d62728" if account_profit>0 else "green"), unsafe_allow_html=True)
-    with m3: st.markdown(metric_html("策略年化 (CAGR)", f"{strat_metrics.get('CAGR',0):.1%}", "Time Weighted"), unsafe_allow_html=True)
-    with m4: st.markdown(metric_html("最大回撤", f"{strat_metrics.get('Max Drawdown',0):.1%}", "策略风险"), unsafe_allow_html=True)
-    with m5: st.markdown(metric_html("夏普比率", f"{strat_metrics.get('Sharpe Ratio',0):.2f}", "风险调整后收益"), unsafe_allow_html=True)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    with m1: st.markdown(metric_html("账户总资产", f"¥{df_res['总资产'].iloc[-1]:,.0f}", f"盈亏: {account_profit:+,.0f}"), unsafe_allow_html=True)
+    with m2: st.markdown(metric_html("策略Alpha", f"{strat_metrics.get('Alpha',0):+.1%}", "超额收益", "red"), unsafe_allow_html=True)
+    with m3: st.markdown(metric_html("策略Beta", f"{strat_metrics.get('Beta',0):.2f}", "市场敏感度"), unsafe_allow_html=True)
+    with m4: st.markdown(metric_html("总交易次数", f"{trade_count_real}", "换手频率"), unsafe_allow_html=True)
+    with m5: st.markdown(metric_html("夏普比率", f"{strat_metrics.get('Sharpe Ratio',0):.2f}", "风险调整后"), unsafe_allow_html=True)
+    with m6: st.markdown(metric_html("最大回撤", f"{strat_metrics.get('Max Drawdown',0):.1%}", "历史极值"), unsafe_allow_html=True)
 
     # 图表区
-    tab_curve, tab_year, tab_daily, tab_dd = st.tabs(["📈 资产曲线", "📅 年度回报表", "📝 每日交易日记", "📉 风险分析"])
+    tab_curve, tab_year, tab_daily, tab_dd = st.tabs(["📈 净值对比", "📅 年度回报", "📝 交易日记", "📉 风险透视"])
     
     with tab_curve:
         fig = go.Figure()
-        # 账户资产
-        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['总资产'], name="账户总资产", line=dict(color='#1e3c72', width=2)))
-        # 投入本金线
-        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['投入本金'], name="投入本金", line=dict(color='#adb5bd', dash='dash')))
+        # 策略净值
+        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['策略净值'], name="策略净值 (Cost Adjusted)", line=dict(color='#d62728', width=2)))
+        # 基准净值
+        fig.add_trace(go.Scatter(x=df_res.index, y=bm_curve, name="等权基准 (Benchmark)", line=dict(color='#adb5bd', dash='dash')))
         
-        fig.update_layout(height=450, hovermode="x unified", title="账户资产增长曲线 (Asset Growth)")
+        # 标记空仓区域
+        cash_mask = df_res['持仓'] == 'Cash'
+        # 简单画出空仓背景略复杂，这里用散点标记
+        if cash_mask.any():
+            cash_dates = df_res[cash_mask].index
+            cash_vals = df_res.loc[cash_mask, '策略净值']
+            fig.add_trace(go.Scatter(x=cash_dates, y=cash_vals, mode='markers', name="空仓避险", marker=dict(color='green', size=4, symbol='circle')))
+
+        fig.update_layout(height=450, hovermode="x unified", title="策略 vs 基准 (Net Value)")
         st.plotly_chart(fig, use_container_width=True)
         
     with tab_year:
-        # 计算分年度收益
         res_y = []
         years = df_res.index.year.unique()
         for y in years:
@@ -590,49 +691,39 @@ def main():
             end_nav = d_sub['策略净值'].iloc[-1]
             y_ret = end_nav / start_nav - 1
             
-            # 账户当年盈亏
-            start_asset = d_sub['总资产'].iloc[0]
-            end_asset = d_sub['总资产'].iloc[-1]
-            net_inflow = d_sub['投入本金'].iloc[-1] - d_sub['投入本金'].iloc[0]
-            y_profit = end_asset - start_asset - net_inflow
+            # 基准同期
+            b_start = bm_curve.loc[d_sub.index[0]]
+            b_end = bm_curve.loc[d_sub.index[-1]]
+            b_ret = b_end / b_start - 1
             
             res_y.append({
                 "年份": y,
-                "策略收益率": y_ret,
-                "账户当年盈亏": y_profit
+                "策略收益": y_ret,
+                "基准收益": b_ret,
+                "超额(Alpha)": y_ret - b_ret
             })
             
         df_year = pd.DataFrame(res_y).set_index("年份")
-        
-        st.markdown("#### 分年度表现 (Yearly Performance)")
+        st.markdown("#### 年度超额收益表")
         st.dataframe(
-            df_year.style.format({
-                "策略收益率": "{:+.2%}",
-                "账户当年盈亏": "{:+,.0f}"
-            }).background_gradient(subset=["策略收益率"], cmap="RdYlGn", vmin=-0.3, vmax=0.3),
+            df_year.style.format("{:+.2%}").background_gradient(subset=["超额(Alpha)"], cmap="RdYlGn", vmin=-0.2, vmax=0.2),
             use_container_width=True
         )
         
     with tab_daily:
-        st.markdown("#### 每日交易详细记录")
-        # 格式化显示
-        show_df = df_res[['总资产', '投入本金', '持仓', '全市场表现 (Monitor)']].copy()
+        show_df = df_res[['总资产', '投入本金', '持仓', '全市场表现']].copy()
         show_df['持仓名称'] = show_df['持仓'].map(lambda x: name_map.get(x, x))
         show_df = show_df.sort_index(ascending=False)
         st.dataframe(
-            show_df.style.format({
-                "总资产": "{:,.2f}",
-                "投入本金": "{:,.2f}"
-            }), 
-            use_container_width=True,
-            height=400
+            show_df.style.format({"总资产": "{:,.2f}", "投入本金": "{:,.2f}"}), 
+            use_container_width=True, height=400
         )
 
     with tab_dd:
         dd_series = (df_res['策略净值'] - df_res['策略净值'].cummax()) / df_res['策略净值'].cummax()
         fig_dd = go.Figure()
         fig_dd.add_trace(go.Scatter(x=dd_series.index, y=dd_series, fill='tozeroy', line=dict(color='darkred', width=1), name="回撤"))
-        fig_dd.update_layout(title="策略历史回撤 (Drawdown)", yaxis_tickformat='.1%', height=400)
+        fig_dd.update_layout(title="策略动态回撤", yaxis_tickformat='.1%', height=400)
         st.plotly_chart(fig_dd, use_container_width=True)
 
 def metric_html(label, value, sub="", color="black"):
