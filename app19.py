@@ -7,6 +7,8 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, timezone
 import time
+import json
+import os
 
 # 安全导入 scipy，防止未安装导致程序崩溃
 try:
@@ -14,6 +16,45 @@ try:
     HAS_SCIPY = True
 except ImportError:
     HAS_SCIPY = False
+
+# ==========================================
+# 0. 配置持久化管理 (Config Persistence)
+# ==========================================
+CONFIG_FILE = 'strategy_config.json'
+
+# 默认标的池
+DEFAULT_CODES = ["518880", "588000", "513100", "510180"]
+
+DEFAULT_PARAMS = {
+    'lookback': 25,
+    'smooth': 3,
+    'threshold': 0.005,
+    'allow_cash': True,
+    'selected_codes': DEFAULT_CODES
+}
+
+def load_config():
+    """从本地文件加载配置，如果不存在则使用默认值"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                saved_config = json.load(f)
+                # 确保加载的配置包含所有必要的键（合并默认值，防止旧版配置缺失新键）
+                config = DEFAULT_PARAMS.copy()
+                config.update(saved_config)
+                return config
+        except Exception as e:
+            # 文件损坏等情况，回退到默认
+            return DEFAULT_PARAMS.copy()
+    return DEFAULT_PARAMS.copy()
+
+def save_config(config):
+    """保存配置到本地文件"""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f)
+    except Exception as e:
+        pass # 忽略保存错误，避免中断程序
 
 # ==========================================
 # 1. 投行级页面配置 & CSS样式
@@ -97,9 +138,6 @@ st.markdown("""
 # 全局常量配置
 TRANSACTION_COST = 0.0001  # 万分之一
 
-# 默认标的池
-DEFAULT_CODES = ["518880", "588000", "513100", "510180"]
-
 # 预置ETF映射表
 PRESET_ETFS = {
     "518880": "黄金ETF (避险)",
@@ -172,7 +210,7 @@ def download_market_data(codes_list, end_date_str):
     return data, name_map
 
 # ==========================================
-# 3. 策略内核 (Strategy Core) - 升级版
+# 3. 策略内核 (Strategy Core)
 # ==========================================
 
 def calculate_momentum(data, lookback, smooth):
@@ -185,7 +223,6 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, cost_rate=0.0001, all
     """
     向量化快速回测 (含交易成本 & 绝对动量避险)
     """
-    # 信号生成: T-1的数据决定T日
     signal_mom = mom_df.shift(1)
     
     n_days, n_assets = daily_ret.shape
@@ -328,15 +365,14 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
 
 def optimize_parameters(data, allow_cash):
     """
-    优化引擎 v2.0: 包含成本与避险逻辑
-    allow_cash: 是否允许空仓，由UI传入
+    优化引擎 v2.0
     """
     lookbacks = range(20, 31, 1)
     smooths = range(1, 6, 1)    
     thresholds = np.arange(0.0, 0.013, 0.001) 
     
     daily_ret = data.pct_change().fillna(0)
-    n_days = len(daily_ret) # 获取天数用于年化计算
+    n_days = len(daily_ret) 
     results = []
     
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
@@ -350,13 +386,9 @@ def optimize_parameters(data, allow_cash):
         for sm in smooths:
             mom = calculate_momentum(data, lb, sm)
             for th in thresholds:
-                # 启用成本和避险逻辑 (避险状态动态传入)
                 ret, dd, _, count = fast_backtest_vectorized(daily_ret, mom, th, cost_rate=TRANSACTION_COST, allow_cash=allow_cash)
-                
-                # 计算年化收益 (用于展示和排序)
                 ann_ret = (1 + ret) ** (252 / n_days) - 1
-                
-                score = ret / (abs(dd) + 0.05) # 增加分母惩罚项，避免极小回撤导致的超高分
+                score = ret / (abs(dd) + 0.05)
                 results.append([lb, sm, th, ret, ann_ret, dd, count, score])
                 
                 idx += 1
@@ -372,8 +404,10 @@ def optimize_parameters(data, allow_cash):
 # ==========================================
 
 def main():
+    # 1. 状态初始化 (优先加载本地保存的配置)
     if 'params' not in st.session_state:
-        st.session_state.params = {'lookback': 25, 'smooth': 3, 'threshold': 0.005, 'allow_cash': True} # 默认开启避险
+        saved_config = load_config()
+        st.session_state.params = saved_config
 
     # --- 侧边栏 ---
     with st.sidebar:
@@ -381,9 +415,35 @@ def main():
         
         st.subheader("1. 资产池配置")
         all_etfs = get_all_etf_list()
+        
+        # 处理选中项的默认值 (需确保在选项列表中)
         options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
-        defaults = [o for o in options if o.split(" | ")[0] in DEFAULT_CODES] if not all_etfs.empty else DEFAULT_CODES
-        selected_display = st.multiselect("核心标的池", options, default=defaults)
+        
+        # 从session_state或默认配置中获取已选代码
+        current_selection_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
+        
+        # 将代码转换为显示名称 (Options)
+        default_display = []
+        if not all_etfs.empty:
+            for code in current_selection_codes:
+                match = all_etfs[all_etfs['代码'] == code]
+                if not match.empty:
+                    default_display.append(match.iloc[0]['display'])
+                else:
+                    # 如果找不到对应显示名称，尝试保留代码(可能是手动输入的或过期的)
+                    # 这里的逻辑主要是为了兼容。
+                    # 简单起见，如果options里有包含该代码的，就选上
+                    for opt in options:
+                        if opt.startswith(code):
+                            default_display.append(opt)
+                            break
+        else:
+            default_display = current_selection_codes
+
+        # 过滤掉不在options里的默认值，防止报错
+        valid_defaults = [x for x in default_display if x in options]
+
+        selected_display = st.multiselect("核心标的池", options, default=valid_defaults)
         selected_codes = [x.split(" | ")[0] for x in selected_display]
         
         st.divider()
@@ -418,24 +478,41 @@ def main():
         st.divider()
         
         st.subheader("3. 策略内核参数")
+        # 使用 session_state 中的值作为控件默认值
         p_lookback = st.slider("动量周期 (Lookback)", 5, 60, st.session_state.params['lookback'])
         p_smooth = st.slider("平滑窗口 (Smooth)", 1, 10, st.session_state.params['smooth'])
         p_threshold = st.number_input("换仓阈值 (Threshold)", 0.0, 0.05, st.session_state.params['threshold'], step=0.001, format="%.3f")
         
-        # 新增：空仓避险开关
+        # 空仓避险开关
         p_allow_cash = st.checkbox("启用绝对动量避险 (Cash Protection)", 
                                    value=st.session_state.params.get('allow_cash', True),
                                    help="开启: 当最佳标的动量 < 0 时，全仓转为现金避险。\n关闭: 始终持有相对动量最高的标的，即使它在下跌。")
         
-        # 实时显示成本提示
         st.caption(f"ℹ️ 当前交易费率设定: {TRANSACTION_COST*10000:.0f}‱ (万一)")
         
-        st.session_state.params.update({
+        # 实时更新 session_state 并自动保存到本地
+        current_params = {
             'lookback': p_lookback, 
             'smooth': p_smooth, 
             'threshold': p_threshold,
-            'allow_cash': p_allow_cash
-        })
+            'allow_cash': p_allow_cash,
+            'selected_codes': selected_codes
+        }
+        
+        # 检查是否发生变化，有变化则保存
+        if current_params != st.session_state.params:
+            st.session_state.params = current_params
+            save_config(current_params)
+        
+        st.divider()
+        
+        # 重置按钮
+        if st.button("🔄 恢复默认设置 (Reset)", use_container_width=True):
+            # 恢复默认配置
+            default_conf = DEFAULT_PARAMS.copy()
+            st.session_state.params = default_conf
+            save_config(default_conf)
+            st.rerun()
 
     # --- 主界面 ---
     st.markdown("## 🚀 核心资产轮动策略终端 (AlphaTarget Pro)")
