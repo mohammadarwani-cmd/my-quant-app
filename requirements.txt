@@ -4,3 +4,4 @@ numpy
 akshare
 plotly
 matplotlib
+scipy
