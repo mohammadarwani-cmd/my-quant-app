@@ -7,7 +7,13 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, timezone
 import time
-from scipy import stats
+
+# 安全导入 scipy，防止未安装导致程序崩溃
+try:
+    from scipy import stats
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
 
 # ==========================================
 # 1. 投行级页面配置 & CSS样式
@@ -72,6 +78,18 @@ st.markdown("""
     /* 优化表格样式 */
     .dataframe {
         font-size: 13px !important;
+    }
+    
+    /* 总资产大标题 */
+    .total-asset-header {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #1e3c72;
+        margin-bottom: 0.5rem;
+    }
+    .total-asset-sub {
+        font-size: 1rem;
+        color: #666;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -195,7 +213,7 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, cost_rate=0.0001, all
         
         target_idx = curr_idx
         
-        # 2. 绝对动量判定 (避险)
+        # 2. 绝对动量判定 (避险) - 可通过 allow_cash 开关控制
         if allow_cash and best_val < 0:
             target_idx = -1 # 强制空仓
         else:
@@ -204,7 +222,9 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, cost_rate=0.0001, all
                 if best_val > -np.inf: 
                     target_idx = best_idx
             elif curr_idx == -1: # 当前空仓
-                if best_val > 0: # 只有大于0才入场
+                if best_val > 0: # 只有大于0才入场 (如果是避险模式)；非避险模式下只要有信号就入
+                    target_idx = best_idx
+                elif not allow_cash: # 即使小于0，如果关闭避险，也要买
                     target_idx = best_idx
             else: # 当前持有资产
                 # 如果持仓资产数据缺失(退市/停牌)，强制换到best
@@ -284,7 +304,7 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
     
     # 7. Alpha & Beta (相对于等权基准)
     alpha, beta = 0.0, 0.0
-    if bm_ret is not None and len(bm_ret) > 10:
+    if HAS_SCIPY and bm_ret is not None and len(bm_ret) > 10:
         try:
             # 线性回归
             slope, intercept, _, _, _ = stats.linregress(bm_ret.values[1:], daily_ret.values[1:])
@@ -306,20 +326,22 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
         "Trades": trade_count
     }
 
-def optimize_parameters(data):
+def optimize_parameters(data, allow_cash):
     """
     优化引擎 v2.0: 包含成本与避险逻辑
+    allow_cash: 是否允许空仓，由UI传入
     """
     lookbacks = range(20, 31, 1)
     smooths = range(1, 6, 1)    
     thresholds = np.arange(0.0, 0.013, 0.001) 
     
     daily_ret = data.pct_change().fillna(0)
+    n_days = len(daily_ret) # 获取天数用于年化计算
     results = []
     
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
     
-    progress_text = "多维参数空间遍历中 (含交易摩擦模拟)...".format(total_iters)
+    progress_text = f"多维参数空间遍历中 (含交易摩擦, 避险={'开启' if allow_cash else '关闭'})..."
     my_bar = st.progress(0, text=progress_text)
     
     idx = 0
@@ -328,18 +350,21 @@ def optimize_parameters(data):
         for sm in smooths:
             mom = calculate_momentum(data, lb, sm)
             for th in thresholds:
-                # 启用成本和避险逻辑
-                ret, dd, _, count = fast_backtest_vectorized(daily_ret, mom, th, cost_rate=TRANSACTION_COST, allow_cash=True)
+                # 启用成本和避险逻辑 (避险状态动态传入)
+                ret, dd, _, count = fast_backtest_vectorized(daily_ret, mom, th, cost_rate=TRANSACTION_COST, allow_cash=allow_cash)
+                
+                # 计算年化收益 (用于展示和排序)
+                ann_ret = (1 + ret) ** (252 / n_days) - 1
                 
                 score = ret / (abs(dd) + 0.05) # 增加分母惩罚项，避免极小回撤导致的超高分
-                results.append([lb, sm, th, ret, dd, count, score])
+                results.append([lb, sm, th, ret, ann_ret, dd, count, score])
                 
                 idx += 1
                 if idx % 100 == 0:
                     my_bar.progress(min(idx / total_iters, 1.0), text=f"{progress_text} {idx}/{total_iters}")
                     
     my_bar.empty()
-    df_res = pd.DataFrame(results, columns=['周期', '平滑', '阈值', '累计收益', '最大回撤', '调仓次数', '得分'])
+    df_res = pd.DataFrame(results, columns=['周期', '平滑', '阈值', '累计收益', '年化收益', '最大回撤', '调仓次数', '得分'])
     return df_res
 
 # ==========================================
@@ -348,7 +373,7 @@ def optimize_parameters(data):
 
 def main():
     if 'params' not in st.session_state:
-        st.session_state.params = {'lookback': 25, 'smooth': 3, 'threshold': 0.005} # 调整默认值更稳健
+        st.session_state.params = {'lookback': 25, 'smooth': 3, 'threshold': 0.005, 'allow_cash': True} # 默认开启避险
 
     # --- 侧边栏 ---
     with st.sidebar:
@@ -397,11 +422,20 @@ def main():
         p_smooth = st.slider("平滑窗口 (Smooth)", 1, 10, st.session_state.params['smooth'])
         p_threshold = st.number_input("换仓阈值 (Threshold)", 0.0, 0.05, st.session_state.params['threshold'], step=0.001, format="%.3f")
         
+        # 新增：空仓避险开关
+        p_allow_cash = st.checkbox("启用绝对动量避险 (Cash Protection)", 
+                                   value=st.session_state.params.get('allow_cash', True),
+                                   help="开启: 当最佳标的动量 < 0 时，全仓转为现金避险。\n关闭: 始终持有相对动量最高的标的，即使它在下跌。")
+        
         # 实时显示成本提示
         st.caption(f"ℹ️ 当前交易费率设定: {TRANSACTION_COST*10000:.0f}‱ (万一)")
-        st.caption(f"🛡️ 绝对动量避险: 已启用 (动量<0时空仓)")
         
-        st.session_state.params.update({'lookback': p_lookback, 'smooth': p_smooth, 'threshold': p_threshold})
+        st.session_state.params.update({
+            'lookback': p_lookback, 
+            'smooth': p_smooth, 
+            'threshold': p_threshold,
+            'allow_cash': p_allow_cash
+        })
 
     # --- 主界面 ---
     st.markdown("## 🚀 核心资产轮动策略终端 (AlphaTarget Pro)")
@@ -488,13 +522,13 @@ def main():
             best_asset = clean_row.idxmax()
             best_score = clean_row.max()
             
-            # --- 绝对动量避险逻辑 ---
-            if best_score < 0:
+            # --- 绝对动量避险逻辑 (受 p_allow_cash 控制) ---
+            if p_allow_cash and best_score < 0:
                 target = 'Cash'
             else:
                 # 相对动量轮动
                 if curr_hold is None or curr_hold == 'Cash':
-                    target = best_asset # 空仓转多仓
+                    target = best_asset # 空仓转多仓 (或者刚开始)
                 else:
                     curr_score = clean_row.get(curr_hold, -np.inf)
                     if best_asset != curr_hold:
@@ -513,7 +547,7 @@ def main():
         # 2. 执行换仓
         if target != curr_hold:
             # 发生交易 (包括 资产A->资产B, 资产->Cash, Cash->资产)
-            if curr_hold is not None: # 初始建仓不算换仓成本的话，可以加判断。这里假设建仓也算。
+            if curr_hold is not None: 
                 # 扣除成本 (基于当前总权益)
                 total_equity_temp = share_val + cash
                 cost = total_equity_temp * TRANSACTION_COST
@@ -533,8 +567,7 @@ def main():
                 cash += share_val
                 share_val = 0.0
             else:
-                # 变为特定资产 (Cash -> Asset 或 Asset A -> Asset B)
-                # 这里的逻辑是全仓切换：所有钱都变成 Target
+                # 变为特定资产
                 total_money = share_val + cash
                 share_val = total_money
                 cash = 0.0
@@ -566,9 +599,8 @@ def main():
     df_res['全市场表现'] = sliced_ret.apply(lambda r: format_market_perf(r, name_map), axis=1)
     df_res['策略日收益'] = df_res['总资产'].pct_change().fillna(0)
     
-    # === 策略净值 (Unit NAV) 计算 - 含成本 ===
-    # 为了准确对比，使用向量化函数重算一遍净值曲线
-    _, _, nav_series, _ = fast_backtest_vectorized(sliced_ret, sliced_mom, p_threshold, cost_rate=TRANSACTION_COST, allow_cash=True)
+    # === 策略净值 (Unit NAV) 计算 - 含成本 & 避险状态传入 ===
+    _, _, nav_series, _ = fast_backtest_vectorized(sliced_ret, sliced_mom, p_threshold, cost_rate=TRANSACTION_COST, allow_cash=p_allow_cash)
     df_res['策略净值'] = nav_series
     
     # === 计算 Benchmark (等权策略) ===
@@ -584,11 +616,12 @@ def main():
     col_sig1, col_sig2 = st.columns([2, 1])
     with col_sig1:
         hold_name = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '🛡️ 空仓避险 (Cash)'
+        mode_str = "开启" if p_allow_cash else "关闭"
         st.markdown(f"""
         <div class="signal-banner">
             <h3 style="margin:0">📌 当前持仓建议: {hold_name}</h3>
             <div style="margin-top:10px; opacity:0.9">
-                数据截止: {latest_date.strftime('%Y-%m-%d')} | 避险模式: 开启 | 交易费率: 万一
+                数据截止: {latest_date.strftime('%Y-%m-%d')} | 避险模式: {mode_str} | 交易费率: 万一
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -596,8 +629,11 @@ def main():
         st.markdown("**🏆 实时动量排名**")
         if not latest_mom.empty:
             top_score = latest_mom.iloc[0]
-            if top_score < 0:
-                 st.error(f"⚠️ 市场全线转弱 (最高分 {top_score:.2%} < 0)，触发避险")
+            if p_allow_cash and top_score < 0:
+                 st.error(f"⚠️ 全线转弱 (最高 {top_score:.2%} < 0) -> 避险中")
+            elif not p_allow_cash and top_score < 0:
+                 st.warning(f"⚠️ 全线转弱 (最高 {top_score:.2%} < 0) -> 强制持有")
+                 
             for i, (asset, score) in enumerate(latest_mom.head(3).items()):
                 display_name = name_map.get(asset, asset)
                 icon = "🔴" if score < 0 else "🟢"
@@ -613,8 +649,9 @@ def main():
         
         if st.button("运行参数寻优"):
             t0 = time.time()
-            with st.spinner("正在进行多维参数回测 (含成本与避险)..."):
-                opt_df = optimize_parameters(data_to_opt)
+            with st.spinner(f"正在进行多维参数回测 (避险模式={'开启' if p_allow_cash else '关闭'})..."):
+                # 传入当前 UI 选择的 allow_cash 状态
+                opt_df = optimize_parameters(data_to_opt, allow_cash=p_allow_cash)
                 best_ret = opt_df.loc[opt_df['累计收益'].idxmax()]
                 best_calmar = opt_df.loc[opt_df['得分'].idxmax()]
             
@@ -625,12 +662,12 @@ def main():
                 st.info("🔥 进攻型参数")
                 st.write(f"Lookback: {int(best_ret['周期'])}")
                 st.write(f"Threshold: {best_ret['阈值']:.3f}")
-                st.metric("累计收益", f"{best_ret['累计收益']:.1%}", f"换手: {int(best_ret['调仓次数'])}次")
+                st.metric("年化收益 (CAGR)", f"{best_ret['年化收益']:.1%}", f"累计: {best_ret['累计收益']:.1%}")
             with c2:
                 st.success("🛡️ 防御型参数")
                 st.write(f"Lookback: {int(best_calmar['周期'])}")
                 st.write(f"Threshold: {best_calmar['阈值']:.3f}")
-                st.metric("综合得分", f"{best_calmar['得分']:.2f}", f"回撤: {best_calmar['最大回撤']:.1%}")
+                st.metric("年化收益 (CAGR)", f"{best_calmar['年化收益']:.1%}", f"回撤: {best_calmar['最大回撤']:.1%}")
             
             with c3:
                 st.markdown("**🌡️ 参数热力图 (周期 vs 阈值)**")
@@ -653,13 +690,26 @@ def main():
     # 策略vs基准
     strat_metrics = calculate_pro_metrics(df_res['策略净值'].values, bm_curve.values, trade_count_real)
     
+    # 展示总资产标题
+    st.markdown(f"""
+    <div style="margin-bottom: 20px;">
+        <div class="total-asset-header">¥{df_res['总资产'].iloc[-1]:,.0f}</div>
+        <div class="total-asset-sub">
+            投入本金: ¥{df_res['投入本金'].iloc[-1]:,.0f} | 
+            <span style="color: {'#d62728' if account_profit > 0 else 'green'}">
+                总盈亏: {account_profit:+,.0f} ({account_ret:+.2%})
+            </span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    with m1: st.markdown(metric_html("账户总资产", f"¥{df_res['总资产'].iloc[-1]:,.0f}", f"盈亏: {account_profit:+,.0f}"), unsafe_allow_html=True)
-    with m2: st.markdown(metric_html("策略Alpha", f"{strat_metrics.get('Alpha',0):+.1%}", "超额收益", "red"), unsafe_allow_html=True)
-    with m3: st.markdown(metric_html("策略Beta", f"{strat_metrics.get('Beta',0):.2f}", "市场敏感度"), unsafe_allow_html=True)
-    with m4: st.markdown(metric_html("总交易次数", f"{trade_count_real}", "换手频率"), unsafe_allow_html=True)
-    with m5: st.markdown(metric_html("夏普比率", f"{strat_metrics.get('Sharpe Ratio',0):.2f}", "风险调整后"), unsafe_allow_html=True)
-    with m6: st.markdown(metric_html("最大回撤", f"{strat_metrics.get('Max Drawdown',0):.1%}", "历史极值"), unsafe_allow_html=True)
+    with m1: st.markdown(metric_html("年化收益 (CAGR)", f"{strat_metrics.get('CAGR',0):.1%}", f"累计: {strat_metrics.get('Total Return',0):.1%}", "#d62728"), unsafe_allow_html=True)
+    with m2: st.markdown(metric_html("最大回撤", f"{strat_metrics.get('Max Drawdown',0):.1%}", "历史极值", "green"), unsafe_allow_html=True)
+    with m3: st.markdown(metric_html("夏普比率", f"{strat_metrics.get('Sharpe Ratio',0):.2f}", "风险调整后"), unsafe_allow_html=True)
+    with m4: st.markdown(metric_html("策略Alpha", f"{strat_metrics.get('Alpha',0):+.1%}", "超额收益"), unsafe_allow_html=True)
+    with m5: st.markdown(metric_html("策略Beta", f"{strat_metrics.get('Beta',0):.2f}", "市场敏感度"), unsafe_allow_html=True)
+    with m6: st.markdown(metric_html("总交易次数", f"{trade_count_real}", "换手频率"), unsafe_allow_html=True)
 
     # 图表区
     tab_curve, tab_year, tab_daily, tab_dd = st.tabs(["📈 净值对比", "📅 年度回报", "📝 交易日记", "📉 风险透视"])
@@ -673,7 +723,6 @@ def main():
         
         # 标记空仓区域
         cash_mask = df_res['持仓'] == 'Cash'
-        # 简单画出空仓背景略复杂，这里用散点标记
         if cash_mask.any():
             cash_dates = df_res[cash_mask].index
             cash_vals = df_res.loc[cash_mask, '策略净值']
