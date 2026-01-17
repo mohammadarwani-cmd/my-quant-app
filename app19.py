@@ -609,8 +609,19 @@ def main():
         
         share_val = share_val * (1 + day_return)
         
+        # === 修复收益显示逻辑：在换仓前计算旧持仓的最终收益 ===
+        temp_segment_ret = 0.0
+        if curr_hold and curr_hold != 'Cash' and current_hold_start_val > 0:
+            # 计算的是【当前持仓】截止到今天的收益（含当日涨跌）
+            temp_segment_ret = (share_val / current_hold_start_val) - 1
+            
+        # 准备日志变量 (默认是今天结束时的状态，但如果是换仓日，我们希望记录旧持仓的谢幕)
+        log_hold = curr_hold
+        log_days = days_held
+        log_ret = temp_segment_ret
+        note = ""
+
         # 交易执行
-        action = "Hold"
         if target != curr_hold:
             if curr_hold is not None:
                 total_equity = share_val + cash
@@ -619,7 +630,11 @@ def main():
                 else: share_val -= cost
                 trade_count_real += 1
                 days_held = 0 # 重置持仓时间
-                action = f"Switch to {target}"
+                
+                # 记录调仓动作
+                old_name = name_map.get(curr_hold, curr_hold) if curr_hold else "Cash"
+                new_name = name_map.get(target, target) if target else "Cash"
+                note = f"调仓: {old_name} -> {new_name}"
                 
             if target == 'Cash':
                 cash += share_val
@@ -638,18 +653,17 @@ def main():
         total_assets_curve.append(current_total)
         total_invested_curve.append(total_invested)
         
-        # 计算段内持有收益
-        segment_ret = 0.0
-        if curr_hold and curr_hold != 'Cash' and current_hold_start_val > 0:
-            segment_ret = (share_val / current_hold_start_val) - 1
-            
         # 记录详细日志
-        hold_name = name_map.get(curr_hold, curr_hold) if curr_hold and curr_hold != 'Cash' else 'Cash'
+        # 如果发生了换仓，log_hold 还是旧的，log_ret 是旧持仓的最终收益。这正是我们想要的。
+        # 如果没换仓，log_hold 是当前持仓，log_ret 是当前浮盈。
+        hold_name_display = name_map.get(log_hold, log_hold) if log_hold and log_hold != 'Cash' else 'Cash'
+        
         daily_details.append({
             "日期": date.strftime('%Y-%m-%d'),
-            "当前持仓": hold_name,
-            "持仓天数": days_held if curr_hold != 'Cash' else 0,
-            "段内收益": segment_ret if curr_hold != 'Cash' else 0.0,
+            "当前持仓": hold_name_display,
+            "持仓天数": log_days if log_hold != 'Cash' else 0,
+            "段内收益": log_ret if log_hold != 'Cash' else 0.0,
+            "操作": note,
             "总资产": current_total,
             "全市场表现": market_perf_str
         })
@@ -847,7 +861,8 @@ def main():
             column_config={
                 "持仓天数": st.column_config.NumberColumn("持仓天数", help="当前连续持仓天数"),
                 "段内收益": st.column_config.NumberColumn("段内收益", help="本段持仓期间的累计收益率", format="%.2f%%"),
-                "全市场表现": st.column_config.TextColumn("当日全市场表现", width="medium"),
+                "操作": st.column_config.TextColumn("调仓操作", width="medium"),
+                "全市场表现": st.column_config.TextColumn("当日全市场表现", width="large"),
             }
         )
 
