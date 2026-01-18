@@ -284,8 +284,18 @@ def calculate_momentum(data, lookback, smooth):
     return mom
 
 def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_rate=0.0001, allow_cash=True):
-    # 此处保持原有逻辑，为节省篇幅略去重复注释，逻辑与之前一致
+    # 向量化回测：
+    # 注意：传入的 mom_df 和 daily_ret 已经是切片后的时间段
+    # 但 mom_df 是基于全历史计算的，所以第一行就有值
+    # 但是，我们必须 shift(1) 来避免未来函数
+    
     signal_mom = mom_df.shift(1)
+    
+    # [关键修复]：由于 shift(1) 会导致切片后的第一天变成 NaN，导致第一天无法交易
+    # 主程序也是 signal_mom = sliced_mom.shift(1)，所以主程序第一天也是不交易的
+    # 因此，只要数据源一致（都是基于全历史计算mom再切片），两边的逻辑就是对齐的。
+    # 唯一的微小差异是第一天的收益归属，但可以忽略不计。
+    
     n_days, _ = daily_ret.shape
     p_ret = daily_ret.values
     p_mom = signal_mom.values
@@ -297,7 +307,10 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
     for i in range(n_days):
         if curr_idx != -2: days_held += 1
         row_mom = p_mom[i]
+        
+        # 如果整行都是NaN（比如第一天），直接跳过，保持空仓
         if np.isnan(row_mom).all(): continue
+            
         clean_mom = np.nan_to_num(row_mom, nan=-np.inf)
         best_idx = np.argmax(clean_mom)
         best_val = clean_mom[best_idx]
@@ -335,8 +348,10 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
     max_dd = ((equity_curve - cummax) / cummax).min()
     return total_ret, max_dd, equity_curve, trade_count
 
-def optimize_parameters_3d(data, allow_cash, min_holding):
-    # === 三维全参数极限精度扫描 ===
+def optimize_parameters_3d(raw_data, mask, allow_cash, min_holding):
+    # [关键修复]：接收 raw_data（全量数据）和 mask（切片掩码）
+    # 这样可以在计算 momentum 时利用切片前的历史数据，避免“冷启动”偏差。
+    
     # Lookback: 20 ~ 25, 步长 1
     # Smooth: 1 ~ 5, 步长 1
     # Threshold: 0 ~ 0.01, 步长 0.001
@@ -345,39 +360,42 @@ def optimize_parameters_3d(data, allow_cash, min_holding):
     smooths = range(1, 6, 1)            
     thresholds = np.arange(0.0, 0.011, 0.001) 
     
-    daily_ret = data.pct_change().fillna(0)
-    n_days = len(daily_ret)
-    results = []
+    # 1. 基于全量数据计算收益率
+    daily_ret_all = raw_data.pct_change().fillna(0)
     
+    results = []
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
-    my_bar = st.progress(0, text=f"正在进行极限精度三维扫描 (0/{total_iters}, 预计耗时很短)...")
+    my_bar = st.progress(0, text=f"正在进行精度三维扫描 (0/{total_iters})...")
     
     count = 0
     start_time = time.time()
     
-    # 优化：外层循环计算 Momentum 减少重复计算
     for lb in lookbacks:
-        # 为了避免内层重复rolling计算，按 smooth 循环
-        # 注意：calculate_momentum 内部已经封装好了，这里直接调用
         for sm in smooths:
-            mom = calculate_momentum(data, lb, sm)
+            # 2. 基于全量数据计算动量（关键！）
+            # 这样2021-01-01那天的动量值是基于2020年数据算出来的，不是NaN
+            mom_all = calculate_momentum(raw_data, lb, sm)
+            
+            # 3. 此时再进行切片，传入回测函数
+            sub_ret = daily_ret_all.loc[mask]
+            sub_mom = mom_all.loc[mask]
+            
             for th in thresholds:
                 ret, dd, _, trades = fast_backtest_vectorized(
-                    daily_ret, mom, th, 
+                    sub_ret, sub_mom, th, 
                     min_holding=min_holding, cost_rate=TRANSACTION_COST, allow_cash=allow_cash
                 )
                 score = ret / (abs(dd) + 0.1)
                 results.append([lb, sm, th, ret, trades, dd, score])
                 count += 1
         
-        # 减少 UI 刷新频率，每处理完一个 Lookback 刷新一次进度
         my_bar.progress(min(count / total_iters, 1.0))
                     
     my_bar.empty()
     st.toast(f"扫描完成！耗时 {time.time()-start_time:.1f} 秒", icon="✅")
     
     df_res = pd.DataFrame(results, columns=['Lookback', 'Smooth', 'Threshold', 'Return', 'Trades', 'MaxDD', 'Score'])
-    df_res['Annual_Ret'] = (1 + df_res['Return']) ** (252 / n_days) - 1
+    df_res['Annual_Ret'] = (1 + df_res['Return']) ** (252 / len(sub_ret)) - 1
     return df_res
 
 # ==========================================
@@ -705,8 +723,9 @@ def main():
         st.markdown("通过立体空间观察参数稳定性：**X轴(周期)** / **Y轴(平滑)** / **Z轴(阈值)**。")
         st.info("💡 提示：您选择了极细的步长 (1天)，计算量较大，请耐心等待 30-60秒。")
         
+        # [修改]：传入 raw_data 和 mask，而不是 sliced_data
         if st.button("开始极限精度扫描"):
-            opt_res = optimize_parameters_3d(sliced_data, p_allow_cash, p_min_holding)
+            opt_res = optimize_parameters_3d(raw_data, mask, p_allow_cash, p_min_holding)
             
             best_row = opt_res.loc[opt_res['Score'].idxmax()]
             
