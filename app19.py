@@ -1,3 +1,4 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
 import akshare as ak
@@ -867,3 +868,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
