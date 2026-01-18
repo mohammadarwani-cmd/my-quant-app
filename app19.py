@@ -68,45 +68,102 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .stApp { background-color: #f4f6f9; font-family: 'Segoe UI', sans-serif; }
+    .stApp { background-color: #f8f9fa; font-family: 'Segoe UI', 'Roboto', sans-serif; }
     [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e0e0e0; }
     
     /* 指标卡片 */
     .metric-card {
         background-color: #ffffff;
-        border: 1px solid #eaeaea;
-        border-radius: 10px;
-        padding: 15px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.03);
+        border: 1px solid #f0f0f0;
+        border-radius: 12px;
+        padding: 20px 15px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
         text-align: center;
         height: 100%;
+        transition: transform 0.2s;
     }
-    .metric-label { color: #7f8c8d; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; margin-bottom: 5px; }
-    .metric-value { color: #2c3e50; font-size: 1.5rem; font-weight: 700; }
-    .metric-sub { font-size: 0.75rem; color: #95a5a6; margin-top: 4px; }
+    .metric-card:hover { transform: translateY(-2px); box-shadow: 0 6px 12px rgba(0,0,0,0.05); }
+    .metric-label { color: #8898aa; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; }
+    .metric-value { color: #32325d; font-size: 1.6rem; font-weight: 700; line-height: 1.2; }
+    .metric-sub { font-size: 0.8rem; color: #adb5bd; margin-top: 6px; }
 
     /* 信号横幅 */
     .signal-banner {
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
+        padding: 24px;
+        border-radius: 16px;
+        margin-bottom: 24px;
         color: white;
-        background: linear-gradient(135deg, #2c3e50 0%, #4ca1af 100%);
-        box-shadow: 0 4px 10px rgba(44, 62, 80, 0.2);
+        background: linear-gradient(135deg, #172a74 0%, #21a1f1 100%);
+        box-shadow: 0 10px 20px rgba(33, 161, 241, 0.2);
     }
     
-    /* 交易日记标签样式 */
-    .asset-tag {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.85em;
-        font-weight: 500;
-        margin-right: 5px;
-        margin-bottom: 2px;
-        color: #333;
-        border: 1px solid rgba(0,0,0,0.05);
+    /* === 交易日记样式优化 === */
+    .log-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
     }
+    .market-tag {
+        display: inline-flex;
+        align-items: center;
+        background: #fff;
+        border: 1px solid #e9ecef;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 0.85rem;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+        min-width: 140px;
+        justify-content: space-between;
+    }
+    .tag-name {
+        font-weight: 600;
+        color: #525f7f;
+        padding-left: 6px;
+    }
+    .tag-val {
+        font-family: 'Consolas', monospace;
+        font-weight: 700;
+        margin-left: 8px;
+    }
+    .trend-up { color: #d62728; }
+    .trend-down { color: #2ca02c; } /* 中国红涨绿跌 */
+    .trend-flat { color: #adb5bd; }
+    
+    .op-badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: white;
+        background-color: #5e72e4;
+        box-shadow: 0 2px 4px rgba(94, 114, 228, 0.3);
+    }
+    .op-badge-none {
+        color: #ccc;
+        font-size: 0.8rem;
+    }
+    
+    /* 表格覆盖 */
+    table.dataframe { border-collapse: separate !important; border-spacing: 0 8px !important; width: 100%; border: none !important; }
+    table.dataframe th { 
+        background-color: transparent !important; 
+        color: #8898aa !important; 
+        text-transform: uppercase; 
+        font-size: 0.75rem; 
+        border: none !important;
+        padding-bottom: 10px;
+    }
+    table.dataframe td { 
+        background-color: #ffffff; 
+        border-top: 1px solid #e9ecef; 
+        border-bottom: 1px solid #e9ecef; 
+        padding: 15px; 
+        vertical-align: middle !important;
+    }
+    table.dataframe tr td:first-child { border-left: 1px solid #e9ecef; border-top-left-radius: 8px; border-bottom-left-radius: 8px; }
+    table.dataframe tr td:last-child { border-right: 1px solid #e9ecef; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -265,20 +322,30 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
     return total_ret, max_dd, equity_curve, trade_count
 
 def optimize_parameters_3d(data, allow_cash, min_holding):
-    # === 三维全参数扫描 ===
-    lookbacks = range(15, 60, 5)        # 维度1
-    smooths = range(1, 10, 2)           # 维度2
-    thresholds = np.arange(0.0, 0.012, 0.002) # 维度3
+    # === 三维全参数极限精度扫描 ===
+    # Lookback: 10 ~ 60, 步长 1 (原5 -> 1) -> 51 steps
+    # Smooth: 1 ~ 15, 步长 1 (原2 -> 1) -> 15 steps
+    # Threshold: 0 ~ 0.015, 步长 0.001 -> 16 steps
+    # 总迭代约 12,240 次
+    
+    lookbacks = range(10, 61, 1)         
+    smooths = range(1, 16, 1)            
+    thresholds = np.arange(0.0, 0.016, 0.001) 
     
     daily_ret = data.pct_change().fillna(0)
     n_days = len(daily_ret)
     results = []
     
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
-    my_bar = st.progress(0, text=f"正在进行三维空间参数扫描 (0/{total_iters})...")
+    my_bar = st.progress(0, text=f"正在进行极限精度三维扫描 (0/{total_iters}, 预计耗时30-60秒)...")
     
     count = 0
+    start_time = time.time()
+    
+    # 优化：外层循环计算 Momentum 减少重复计算
     for lb in lookbacks:
+        # 为了避免内层重复rolling计算，按 smooth 循环
+        # 注意：calculate_momentum 内部已经封装好了，这里直接调用
         for sm in smooths:
             mom = calculate_momentum(data, lb, sm)
             for th in thresholds:
@@ -286,14 +353,16 @@ def optimize_parameters_3d(data, allow_cash, min_holding):
                     daily_ret, mom, th, 
                     min_holding=min_holding, cost_rate=TRANSACTION_COST, allow_cash=allow_cash
                 )
-                # 简单打分：收益 / (|最大回撤| + 0.1)
                 score = ret / (abs(dd) + 0.1)
                 results.append([lb, sm, th, ret, trades, dd, score])
                 count += 1
-                if count % 20 == 0:
-                    my_bar.progress(min(count / total_iters, 1.0))
+        
+        # 减少 UI 刷新频率，每处理完一个 Lookback 刷新一次进度
+        my_bar.progress(min(count / total_iters, 1.0))
                     
     my_bar.empty()
+    st.toast(f"扫描完成！耗时 {time.time()-start_time:.1f} 秒", icon="✅")
+    
     df_res = pd.DataFrame(results, columns=['Lookback', 'Smooth', 'Threshold', 'Return', 'Trades', 'MaxDD', 'Score'])
     df_res['Annual_Ret'] = (1 + df_res['Return']) ** (252 / n_days) - 1
     return df_res
@@ -310,12 +379,11 @@ def main():
     with st.sidebar:
         st.title("🎛️ 策略控制台")
         
-        # 1. 标的选择 (放在Form外面，因为需要动态交互)
+        # 1. 标的选择
         st.subheader("1. 标的池配置")
         all_etfs = get_all_etf_list()
         etf_options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
         
-        # 恢复上次选择
         current_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
         default_display = []
         if not all_etfs.empty:
@@ -333,14 +401,12 @@ def main():
         )
         selected_codes_final = [x.split(" | ")[0] for x in selected_display]
 
-        # 2. 参数表单 (Form: 只有点击提交才运行)
+        # 2. 参数表单
         with st.form("strategy_form"):
             st.divider()
             st.subheader("2. 资金与时间")
             
-            # 时间设置：固定起始 2021-01-01
             c_d1, c_d2 = st.columns(2)
-            # 默认从2021-01-01开始
             p_start_date = c_d1.date_input("开始日期", datetime(2021, 1, 1))
             p_end_date = c_d2.date_input("结束日期", datetime.now())
             
@@ -359,11 +425,9 @@ def main():
             p_allow_cash = st.checkbox("允许空仓 (Cash Protection)", value=st.session_state.params.get('allow_cash', True))
             
             st.markdown("### ")
-            # 提交按钮
             submitted = st.form_submit_button("🚀 确认修改并运行", type="primary")
 
     # --- 逻辑处理 ---
-    # 如果是第一次加载，或者点击了提交按钮，则更新参数并运行
     if submitted or 'run_once' not in st.session_state:
         st.session_state.run_once = True
         current_params = {
@@ -373,10 +437,8 @@ def main():
         st.session_state.params = current_params
         save_config(current_params)
     
-    # 获取当前生效的参数
     run_codes = st.session_state.params['selected_codes']
     
-    # 页面主体
     st.markdown("## 🚀 核心资产轮动策略终端 Pro")
     
     if not run_codes:
@@ -394,9 +456,7 @@ def main():
         st.error("无法获取数据，请检查网络或代码有效性。")
         st.stop()
 
-    # 数据切片
     daily_ret_all = raw_data.pct_change().fillna(0)
-    # 使用当前参数计算动量
     mom_all = calculate_momentum(raw_data, p_lookback, p_smooth)
     
     mask = (raw_data.index >= start_date_ts) & (raw_data.index <= end_date_ts)
@@ -409,7 +469,7 @@ def main():
     sliced_mom = mom_all.loc[mask]
     sliced_ret = daily_ret_all.loc[mask]
     
-    # === 策略回测逻辑 (无SIP) ===
+    # === 策略回测逻辑 ===
     signal_mom = sliced_mom.shift(1)
     dates = sliced_ret.index
     
@@ -421,32 +481,31 @@ def main():
     total_assets_curve = []
     daily_details = []
     
-    # 生成按顺序的列名列表（用于日记固定顺序显示）
-    # 优先使用用户选择的顺序
     ordered_names = [name_map.get(c, c) for c in run_codes if c in name_map]
     
     def format_market_perf_html(row, ordered_keys, name_mapping):
         html_parts = []
+        html_parts.append('<div class="log-container">')
         for name in ordered_keys:
             if name in row.index:
                 val = row[name]
-                color_bg = get_color_from_name(name, alpha=0.15)
-                # 涨跌幅颜色
-                val_color = "#d62728" if val > 0 else "#2ca02c"
+                line_color = get_hex_color(name)
+                arrow = "▲" if val > 0 else "▼" if val < 0 else "-"
+                val_class = "trend-up" if val > 0 else "trend-down" if val < 0 else "trend-flat"
                 html = f"""
-                <span class="asset-tag" style="background-color:{color_bg};">
-                    {name} <span style="color:{val_color};font-weight:bold;">{val:+.2%}</span>
-                </span>
+                <div class="market-tag">
+                    <span class="tag-name" style="border-left: 3px solid {line_color}">{name}</span>
+                    <span class="tag-val {val_class}">{arrow} {abs(val):.2%}</span>
+                </div>
                 """
                 html_parts.append(html)
+        html_parts.append('</div>')
         return "".join(html_parts)
 
     for i, date in enumerate(dates):
-        # 1. 市场表现 HTML 生成
         r_today = sliced_ret.loc[date]
         market_perf_html = format_market_perf_html(r_today, ordered_names, name_map)
         
-        # 2. 策略逻辑
         if curr_hold: days_held += 1
         
         row = signal_mom.loc[date]
@@ -471,18 +530,15 @@ def main():
                         else:
                             target = curr_hold
 
-        # 3. 净值更新
         day_return = 0.0
         if curr_hold and curr_hold != 'Cash' and curr_hold in r_today:
             day_return = r_today[curr_hold]
             
         share_val = share_val * (1 + day_return)
         
-        # 4. 调仓执行
-        note = ""
+        note_html = '<span class="op-badge-none">-</span>'
         if target != curr_hold:
             if curr_hold is not None:
-                # 卖出成本
                 total_equity = share_val + cash
                 cost = total_equity * TRANSACTION_COST
                 if cash >= cost: cash -= cost
@@ -491,7 +547,7 @@ def main():
                 
                 old = name_map.get(curr_hold, curr_hold) if curr_hold else "Cash"
                 new = name_map.get(target, target) if target else "Cash"
-                note = f"🔄 {old} -> {new}"
+                note_html = f'<span class="op-badge">🔄 {old} → {new}</span>'
             
             if target == 'Cash':
                 cash += share_val
@@ -507,14 +563,13 @@ def main():
         holdings_history.append(curr_hold if curr_hold else "Cash")
         total_assets_curve.append(current_total)
         
-        # 记录日记
         display_hold = name_map.get(curr_hold, curr_hold) if curr_hold and curr_hold != 'Cash' else 'Cash'
         daily_details.append({
             "日期": date,
-            "当前持仓": display_hold,
-            "日收益": day_return, # 仅持仓资产的当日涨跌
+            "当前持仓": f"<b>{display_hold}</b>",
+            "日收益": day_return, 
             "总资产": current_total,
-            "操作": note,
+            "操作": note_html,
             "市场全景": market_perf_html
         })
 
@@ -525,16 +580,13 @@ def main():
     }, index=dates)
     
     df_res['净值'] = df_res['总资产'] / p_initial_capital
-    bm_curve = (1 + sliced_ret.mean(axis=1)).cumprod() # 等权基准
+    bm_curve = (1 + sliced_ret.mean(axis=1)).cumprod() 
     
-    # 统计指标
     total_ret = df_res['净值'].iloc[-1] - 1
     ann_ret = (1 + total_ret) ** (252 / len(dates)) - 1
     max_dd = ((df_res['净值'] - df_res['净值'].cummax()) / df_res['净值'].cummax()).min()
     
     # === UI 展示 ===
-    
-    # 信号横幅
     last_h = holdings_history[-1]
     h_name = name_map.get(last_h, last_h) if last_h != 'Cash' else '🛡️ 空仓 (Cash)'
     
@@ -543,7 +595,7 @@ def main():
         st.markdown(f"""
         <div class="signal-banner">
             <h3 style="margin:0">当前持仓: {h_name}</h3>
-            <p style="margin:5px 0 0 0; opacity:0.9">连续持仓: {days_held} 天</p>
+            <p style="margin:8px 0 0 0; opacity:0.9; font-size:0.95rem;">连续持仓: <b>{days_held}</b> 天</p>
         </div>
         """, unsafe_allow_html=True)
     with col_kpi:
@@ -553,78 +605,110 @@ def main():
         k3.markdown(metric_html("最大回撤", f"{max_dd:.1%}", "Max Drawdown", "#2ca02c"), unsafe_allow_html=True)
         k4.markdown(metric_html("当前资产", f"¥{current_total:,.0f}", "Asset", "#2c3e50"), unsafe_allow_html=True)
 
-    # Tabs
-    tab1, tab2, tab3 = st.tabs(["📈 综合走势对比", "🛠️ 3D参数优化引擎", "📝 交易日记"])
+    # Tabs (恢复年度/月度回报 Tab)
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 综合走势对比", "📅 年度/月度回报", "🛠️ 3D参数优化引擎", "📝 交易日记"])
     
     with tab1:
         st.markdown("##### 策略 vs 基准 vs 标的走势 (归一化对比)")
         fig = go.Figure()
         
-        # 1. 策略曲线 (加粗)
         fig.add_trace(go.Scatter(
-            x=df_res.index, y=df_res['净值'], 
-            name="🤖 策略净值", 
-            line=dict(color='#d62728', width=3),
-            mode='lines'
+            x=df_res.index, y=df_res['净值'], name="🤖 策略净值", 
+            line=dict(color='#d62728', width=3), mode='lines'
         ))
         
-        # 2. 基准曲线
         fig.add_trace(go.Scatter(
-            x=bm_curve.index, y=bm_curve, 
-            name="📊 等权基准", 
-            line=dict(color='gray', width=2, dash='dash'),
-            visible='legendonly' # 默认隐藏，点击显示
+            x=bm_curve.index, y=bm_curve, name="📊 等权基准", 
+            line=dict(color='gray', width=2, dash='dash'), visible='legendonly' 
         ))
         
-        # 3. 所有标的曲线 (归一化)
-        # 将起点设为1以便比较
         normalized_data = sliced_data / sliced_data.iloc[0]
-        
         for col in normalized_data.columns:
             display_name = name_map.get(col, col)
             line_color = get_hex_color(display_name)
             fig.add_trace(go.Scatter(
                 x=normalized_data.index, y=normalized_data[col],
                 name=f"{display_name}",
-                line=dict(width=1, color=line_color),
-                opacity=0.6,
-                visible='legendonly' # 默认隐藏，不喧宾夺主，用户自己点
+                line=dict(width=1, color=line_color), opacity=0.6, visible='legendonly' 
             ))
             
         fig.update_layout(
-            height=500, 
-            hovermode="x unified",
-            xaxis_title="", 
+            height=500, hovermode="x unified", xaxis_title="", 
             yaxis_title="归一化净值 (Start=1.0)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig, use_container_width=True)
-        
+
     with tab2:
-        st.markdown("#### 🛠️ 三维参数全景扫描 (Lookback x Smooth x Threshold)")
-        st.info("提示：点击下方按钮开始遍历。点越大/颜色越深代表得分越高。图表可拖动旋转。")
+        # === 恢复的功能：年度/月度回报 ===
+        st.markdown("##### 📅 年度盈亏统计")
+        res_y = []
+        years = df_res.index.year.unique()
+        for y in years:
+            d_sub = df_res[df_res.index.year == y]
+            if d_sub.empty: continue
+            y_ret = d_sub['净值'].iloc[-1] / d_sub['净值'].iloc[0] - 1
+            # 基准
+            b_start = bm_curve.loc[d_sub.index[0]]
+            b_end = bm_curve.loc[d_sub.index[-1]]
+            b_ret = b_end / b_start - 1
+            res_y.append({"年份": y, "策略收益": y_ret, "基准收益": b_ret, "超额(Alpha)": y_ret - b_ret})
         
-        if st.button("开始3D参数寻优"):
+        if res_y:
+            st.dataframe(pd.DataFrame(res_y).set_index("年份").style.format("{:+.2%}").background_gradient(subset=["超额(Alpha)"], cmap="RdYlGn", vmin=-0.2, vmax=0.2), use_container_width=True)
+
+        st.markdown("##### 🗓️ 月度收益矩阵 (Heatmap)")
+        # 计算月度收益
+        df_nav = df_res['净值'].resample('ME').last() # Pandas 2.0+
+        monthly_rets = df_nav.pct_change().fillna(0)
+        
+        monthly_data = []
+        for date, val in monthly_rets.items():
+            monthly_data.append({'Year': date.year, 'Month': date.month, 'Return': val})
+            
+        if monthly_data:
+            df_month = pd.DataFrame(monthly_data)
+            pivot_month = df_month.pivot(index='Year', columns='Month', values='Return')
+            # 补全
+            for m in range(1, 13):
+                if m not in pivot_month.columns: pivot_month[m] = np.nan
+            pivot_month = pivot_month.sort_index(ascending=False).sort_index(axis=1)
+            
+            fig_m = px.imshow(pivot_month, 
+                              labels=dict(x="月份", y="年份", color="收益率"),
+                              x=[f"{i}月" for i in range(1, 13)],
+                              color_continuous_scale="RdYlGn", 
+                              color_continuous_midpoint=0.0,
+                              text_auto=".1%")
+            fig_m.update_layout(height=400)
+            st.plotly_chart(fig_m, use_container_width=True)
+        else:
+            st.info("数据不足以生成月度矩阵")
+
+    with tab3:
+        st.markdown("#### 🛠️ 三维参数极限精度扫描")
+        st.markdown("通过立体空间观察参数稳定性：**X轴(周期)** / **Y轴(平滑)** / **Z轴(阈值)**。")
+        st.info("💡 提示：您选择了极细的步长 (1天)，计算量较大，请耐心等待 30-60秒。")
+        
+        if st.button("开始极限精度扫描"):
             opt_res = optimize_parameters_3d(sliced_data, p_allow_cash, p_min_holding)
             
-            # 找到最佳
             best_row = opt_res.loc[opt_res['Score'].idxmax()]
             
             c1, c2 = st.columns(2)
-            c1.success(f"最佳参数组合: Lookback={best_row['Lookback']}, Smooth={best_row['Smooth']}, Th={best_row['Threshold']:.3f}")
-            c2.metric("最佳年化收益", f"{best_row['Annual_Ret']:.1%}")
+            c1.success(f"👑 最佳参数: Lookback={best_row['Lookback']}, Smooth={best_row['Smooth']}, Th={best_row['Threshold']:.3f}")
+            c2.metric("最佳年化收益", f"{best_row['Annual_Ret']:.1%}", f"回撤: {best_row['MaxDD']:.1%}")
             
-            # 3D 散点图
             fig_3d = go.Figure(data=[go.Scatter3d(
                 x=opt_res['Lookback'],
                 y=opt_res['Smooth'],
                 z=opt_res['Threshold'],
                 mode='markers',
                 marker=dict(
-                    size=opt_res['Score'] * 5 + 2, # 分数越高点越大
-                    color=opt_res['Annual_Ret'],   # 颜色代表收益率
-                    colorscale='Viridis',
-                    opacity=0.8,
+                    size=opt_res['Score'] * 6 + 1, 
+                    color=opt_res['Annual_Ret'],  
+                    colorscale='Plasma', 
+                    opacity=0.7,
                     colorbar=dict(title="年化收益")
                 ),
                 hovertemplate =
@@ -641,33 +725,26 @@ def main():
                     yaxis_title='Smooth (平滑)',
                     zaxis_title='Threshold (阈值)'
                 ),
-                height=600,
+                height=650,
                 margin=dict(r=0, b=0, l=0, t=0)
             )
             st.plotly_chart(fig_3d, use_container_width=True)
 
-    with tab3:
-        # 交易日记
+    with tab4:
+        # 交易日记 - 2.0 样式
         df_log = pd.DataFrame(daily_details)
         df_log['日期'] = df_log['日期'].dt.strftime('%Y-%m-%d')
+        df_log['总资产'] = df_log['总资产'].apply(lambda x: f"<b>¥{x:,.0f}</b>")
         
-        # HTML 渲染
         st.write(
             df_log.sort_values("日期", ascending=False).to_html(
                 columns=["日期", "当前持仓", "操作", "总资产", "市场全景"],
                 index=False,
-                escape=False, # 允许HTML渲染
+                escape=False, 
                 classes="dataframe"
             ),
             unsafe_allow_html=True
         )
-        st.markdown("""
-        <style>
-        table.dataframe { width: 100%; text-align: left; border-collapse: collapse; }
-        table.dataframe th { background-color: #f0f2f6; padding: 10px; font-size: 14px; }
-        table.dataframe td { padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; vertical-align: middle; }
-        </style>
-        """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
