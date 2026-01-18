@@ -97,56 +97,62 @@ st.markdown("""
         box-shadow: 0 10px 20px rgba(33, 161, 241, 0.2);
     }
     
-    /* === 交易日记样式优化 === */
+    /* === 交易日记样式优化 (Grid 布局) === */
     .log-container {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); /* 自动填充网格，最小110px */
+        gap: 6px;
+        width: 100%;
         align-items: center;
     }
     .market-tag {
-        display: inline-flex;
+        display: flex;
         align-items: center;
-        background: #fff;
+        background: #f8f9fa;
         border: 1px solid #e9ecef;
-        border-radius: 6px;
-        padding: 4px 10px;
-        font-size: 0.85rem;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-        min-width: 140px;
+        border-radius: 4px;
+        padding: 3px 6px;
+        font-size: 0.75rem; /* 字体改小 */
         justify-content: space-between;
+        white-space: nowrap; /* 不换行 */
+        overflow: hidden;
     }
     .tag-name {
         font-weight: 600;
         color: #525f7f;
-        padding-left: 6px;
+        padding-left: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis; /* 超长省略 */
+        max-width: 55px;
     }
     .tag-val {
         font-family: 'Consolas', monospace;
         font-weight: 700;
-        margin-left: 8px;
+        margin-left: 4px;
+        font-size: 0.75rem;
     }
     .trend-up { color: #d62728; }
-    .trend-down { color: #2ca02c; } /* 中国红涨绿跌 */
+    .trend-down { color: #2ca02c; } 
     .trend-flat { color: #adb5bd; }
     
     .op-badge {
         display: inline-block;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 0.85rem;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.8rem;
         font-weight: 600;
-        color: white;
-        background-color: #5e72e4;
-        box-shadow: 0 2px 4px rgba(94, 114, 228, 0.3);
+        color: #172a74;
+        background-color: #e3e8ff;
+        border: 1px solid #c7d0ff;
     }
     .op-badge-none {
-        color: #ccc;
+        color: #ddd;
         font-size: 0.8rem;
     }
     
-    /* 表格覆盖 */
-    table.dataframe { border-collapse: separate !important; border-spacing: 0 8px !important; width: 100%; border: none !important; }
+    /* 表格覆盖 - 强制对齐 */
+    table.dataframe { border-collapse: separate !important; border-spacing: 0 4px !important; width: 100%; border: none !important; table-layout: fixed; }
     table.dataframe th { 
         background-color: transparent !important; 
         color: #8898aa !important; 
@@ -154,16 +160,24 @@ st.markdown("""
         font-size: 0.75rem; 
         border: none !important;
         padding-bottom: 10px;
+        text-align: left !important;
     }
     table.dataframe td { 
         background-color: #ffffff; 
-        border-top: 1px solid #e9ecef; 
-        border-bottom: 1px solid #e9ecef; 
-        padding: 15px; 
+        border-top: 1px solid #f1f3f5; 
+        border-bottom: 1px solid #f1f3f5; 
+        padding: 10px 8px; 
         vertical-align: middle !important;
+        font-size: 0.85rem;
     }
-    table.dataframe tr td:first-child { border-left: 1px solid #e9ecef; border-top-left-radius: 8px; border-bottom-left-radius: 8px; }
-    table.dataframe tr td:last-child { border-right: 1px solid #e9ecef; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
+    /* 列宽控制 */
+    table.dataframe td:nth-child(1) { width: 90px; white-space: nowrap; color: #8898aa; } /* 日期 */
+    table.dataframe td:nth-child(2) { width: 100px; white-space: nowrap; font-weight: bold; } /* 持仓 */
+    table.dataframe td:nth-child(3) { width: 160px; } /* 操作 */
+    table.dataframe td:nth-child(4) { width: 100px; white-space: nowrap; font-family: monospace; } /* 总资产 */
+    table.dataframe td:nth-child(5) { width: auto; } /* 市场全景 (自适应) */
+    
+    table.dataframe tr:hover td { background-color: #f8f9fe; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -323,21 +337,20 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
 
 def optimize_parameters_3d(data, allow_cash, min_holding):
     # === 三维全参数极限精度扫描 ===
-    # Lookback: 10 ~ 60, 步长 1 (原5 -> 1) -> 51 steps
-    # Smooth: 1 ~ 15, 步长 1 (原2 -> 1) -> 15 steps
-    # Threshold: 0 ~ 0.015, 步长 0.001 -> 16 steps
-    # 总迭代约 12,240 次
+    # Lookback: 20 ~ 25, 步长 1
+    # Smooth: 1 ~ 5, 步长 1
+    # Threshold: 0 ~ 0.01, 步长 0.001
     
-    lookbacks = range(10, 61, 1)         
-    smooths = range(1, 16, 1)            
-    thresholds = np.arange(0.0, 0.016, 0.001) 
+    lookbacks = range(20, 26, 1)         
+    smooths = range(1, 6, 1)            
+    thresholds = np.arange(0.0, 0.011, 0.001) 
     
     daily_ret = data.pct_change().fillna(0)
     n_days = len(daily_ret)
     results = []
     
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
-    my_bar = st.progress(0, text=f"正在进行极限精度三维扫描 (0/{total_iters}, 预计耗时30-60秒)...")
+    my_bar = st.progress(0, text=f"正在进行极限精度三维扫描 (0/{total_iters}, 预计耗时很短)...")
     
     count = 0
     start_time = time.time()
@@ -492,10 +505,12 @@ def main():
                 line_color = get_hex_color(name)
                 arrow = "▲" if val > 0 else "▼" if val < 0 else "-"
                 val_class = "trend-up" if val > 0 else "trend-down" if val < 0 else "trend-flat"
+                
+                # 简化 Tag 结构
                 html = f"""
                 <div class="market-tag">
                     <span class="tag-name" style="border-left: 3px solid {line_color}">{name}</span>
-                    <span class="tag-val {val_class}">{arrow} {abs(val):.2%}</span>
+                    <span class="tag-val {val_class}">{arrow}{abs(val):.2%}</span>
                 </div>
                 """
                 html_parts.append(html)
@@ -566,7 +581,7 @@ def main():
         display_hold = name_map.get(curr_hold, curr_hold) if curr_hold and curr_hold != 'Cash' else 'Cash'
         daily_details.append({
             "日期": date,
-            "当前持仓": f"<b>{display_hold}</b>",
+            "当前持仓": display_hold, # 去掉 <b> 以防止表格错位，样式已在CSS中加粗
             "日收益": day_return, 
             "总资产": current_total,
             "操作": note_html,
