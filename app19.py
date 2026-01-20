@@ -959,10 +959,28 @@ def main():
         pivot_table.columns = [f"{i}月" for i in range(1, 13)]
         pivot_table['年度'] = (1 + pivot_table).prod(axis=1) - 1
         
-        st.dataframe(pivot_table.style.format("{:.2%}"), use_container_width=True)
+        # [还原与优化] 增加热力图背景，恢复美观的显示效果
+        st.dataframe(
+            pivot_table.style.format("{:.2%}")
+            .background_gradient(cmap='RdYlGn', vmin=-0.15, vmax=0.15, axis=None),
+            use_container_width=True
+        )
 
     with tab3:
-        st.dataframe(pd.DataFrame(daily_details), use_container_width=True)
+        # [还原与优化] 增加数据格式化
+        df_details = pd.DataFrame(daily_details)
+        
+        # 动态构建格式化字典
+        format_dict = {"段内收益": "{:.2%}", "总资产": "{:,.2f}", "总投入": "{:,.2f}"}
+        for col in df_details.columns:
+            if col not in ["日期", "当前持仓", "持仓天数", "操作", "段内收益", "总资产", "总投入"]:
+                 if df_details[col].dtype == 'float64':
+                     format_dict[col] = "{:.2%}" # 资产的每日涨跌幅格式化为百分比
+        
+        st.dataframe(
+            df_details.style.format(format_dict, na_rep="-"), 
+            use_container_width=True
+        )
 
 if __name__ == "__main__":
     main()
