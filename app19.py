@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import akshare as ak
 import plotly.graph_objects as go
-import plotly.express as px
+import plotly.express as p
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, timezone
 import time
@@ -1034,3 +1034,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
