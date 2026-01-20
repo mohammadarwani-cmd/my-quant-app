@@ -123,7 +123,6 @@ st.markdown("""
         border-radius: 12px;
         margin-bottom: 25px;
         color: white;
-        background: linear-gradient(135deg, #2c3e50 0%, #4ca1af 100%);
         box-shadow: 0 4px 15px rgba(44, 62, 80, 0.3);
         position: relative;
         overflow: hidden;
@@ -369,7 +368,7 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
 def optimize_parameters(data, allow_cash, min_holding):
     methods = ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)']
     lookbacks = range(20, 31, 1) 
-    smooths = range(1, 8, 1)     
+    smooths = range(1, 8, 1)      
     thresholds = np.arange(0.0, 0.013, 0.001)
     
     daily_ret = data.pct_change().fillna(0)
@@ -688,29 +687,74 @@ def main():
     df_res['策略净值'] = nav_series
     bm_curve = (1 + sliced_ret.mean(axis=1)).cumprod()
     
-    # 信号栏
+    # ==========================
+    # 信号栏 (Modified for Direct Instruction)
+    # ==========================
     latest_mom = mom_all.iloc[-1].dropna().sort_values(ascending=False)
     last_hold = holdings_history[-1]
     
+    # 计算下一个交易日的建议 (Based on Latest Data)
+    latest_row = mom_all.iloc[-1]
+    next_target = last_hold # 默认为保持现状
+    
+    if not latest_row.isna().all():
+        clean_row = latest_row.fillna(-np.inf)
+        best_asset = clean_row.idxmax()
+        best_score = clean_row.max()
+        
+        curr_score_val = clean_row.get(last_hold, -np.inf) if last_hold != 'Cash' else -np.inf
+        
+        # 1. 避险逻辑
+        if p_allow_cash and best_score < 0:
+            next_target = 'Cash'
+        else:
+            # 2. 轮动逻辑
+            if last_hold is None or last_hold == 'Cash':
+                if best_score > 0 or (not p_allow_cash):
+                    next_target = best_asset
+            else:
+                # 检查持仓锁定
+                if days_held >= p_min_holding:
+                    if best_asset != last_hold:
+                        if best_score > curr_score_val + p_threshold:
+                            next_target = best_asset
+                else:
+                    # 锁定中，强制持有
+                    next_target = last_hold
+
+    # 生成指令文本
+    if next_target == last_hold:
+        curr_disp = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '空仓 (Cash)'
+        instruction_text = f"下一个交易日继续持有 <b>{curr_disp}</b>"
+        instruction_bg = "linear-gradient(135deg, #2c3e50 0%, #4ca1af 100%)" # 绿色/稳健系
+        instruction_icon = "✅"
+    else:
+        next_disp = name_map.get(next_target, next_target) if next_target != 'Cash' else '空仓 (Cash)'
+        instruction_text = f"下一个交易日调仓到 <b>{next_disp}</b>"
+        instruction_bg = "linear-gradient(135deg, #c0392b 0%, #d35400 100%)" # 红色/警示系
+        instruction_icon = "🔔"
+
     col_sig1, col_sig2 = st.columns([2, 1])
     with col_sig1:
         hold_name = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '🛡️ 空仓避险 (Cash)'
         lock_msg = f"(已持仓 {days_held} 天)" if last_hold != 'Cash' else ""
         if days_held < p_min_holding and last_hold != 'Cash': lock_msg += " 🔒 **锁定中**"
         
-        # [修改] 简化显示，移除实时数据标签
         data_last_date = raw_data.index[-1].strftime('%Y-%m-%d')
         
         st.markdown(f"""
-        <div class="signal-banner">
-            <h3 style="margin:0">📌 当前持仓: {hold_name}</h3>
-            <div style="margin-top:5px; font-size: 0.9rem">
-                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg} | 数据截止: {data_last_date}
+        <div class="signal-banner" style="background: {instruction_bg};">
+            <h3 style="margin:0; font-size: 1.5rem;">{instruction_icon} {instruction_text}</h3>
+            <div style="margin-top:10px; font-size: 1rem; opacity: 0.9">
+                当前持仓: {hold_name} {lock_msg}
+            </div>
+            <div style="margin-top:5px; font-size: 0.8rem; opacity: 0.7">
+                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 | 数据截止: {data_last_date}
             </div>
         </div>""", unsafe_allow_html=True)
         
     with col_sig2:
-        st.markdown("**🏆 实时排名**")
+        st.markdown("**🏆 实时强弱排名**")
         for i, (asset, score) in enumerate(latest_mom.head(3).items()):
             display_name = name_map.get(asset, asset)
             st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
@@ -859,109 +903,57 @@ def main():
         colors = px.colors.qualitative.Plotly
         for i, asset in enumerate(overlay_assets):
             s = sliced_data[asset]
-            # Normalize to 1.0 at start (or first valid) then scale to strategy start? 
-            # Standard comparison: normalize to 1.0 at day 0. Strategy also starts (implied) from 1.0 base.
-            if not s.empty:
-                first_valid = s.first_valid_index()
-                if first_valid:
-                    # Normalize: s / s[0] * strategy[0] (to align starting points visually)
-                    # Strategy net value[0] is (1+ret[0]). Let's align to 1.0 roughly.
-                    base_val = df_res['策略净值'].iloc[0] if not df_res['策略净值'].empty else 1.0
-                    s_norm = (s / s.loc[first_valid]) * base_val
-                    
-                    fig.add_trace(go.Scatter(
-                        x=s.index, y=s_norm, 
-                        name=f"{asset} (Normalized)", 
-                        mode='lines',
-                        line=dict(width=1, dash='dot'),
-                        opacity=0.7
-                    ), row=1, col=1)
+            # Normalize to match strategy start
+            s_norm = s / s.iloc[0] * df_res['策略净值'].iloc[0]
+            name = name_map.get(asset, asset)
+            fig.add_trace(go.Scatter(x=s.index, y=s_norm, name=name, line=dict(width=1), opacity=0.7), row=1, col=1)
 
-        drawdown_series = (df_res['策略净值'] - df_res['策略净值'].cummax()) / df_res['策略净值'].cummax()
-        fig.add_trace(go.Scatter(x=df_res.index, y=drawdown_series, name="回撤", fill='tozeroy', line=dict(color='#c0392b', width=1)), row=2, col=1)
+        # Plot Holdings Background
+        y_min, y_max = df_res['策略净值'].min(), df_res['策略净值'].max()
         
-        df_res['持仓名称'] = df_res['持仓'].map(lambda x: name_map.get(x, x))
-        df_res['持仓变化'] = df_res['持仓'] != df_res['持仓'].shift(1)
-        change_indices = df_res[df_res['持仓变化']].index.tolist()
-        if df_res.index[0] not in change_indices: change_indices.insert(0, df_res.index[0])
-        change_indices.append(df_res.index[-1] + timedelta(days=1))
+        # Optimize filling: group by consecutive holdings
+        df_res['hold_grp'] = (df_res['持仓'] != df_res['持仓'].shift()).cumsum()
+        grp_data = df_res.reset_index().groupby('hold_grp').agg({
+            'index': ['first', 'last'],
+            '持仓': 'first'
+        })
         
-        shapes = []
-        for i in range(len(change_indices) - 1):
-            start_t = change_indices[i]
-            end_t = change_indices[i+1]
-            try:
-                if start_t > df_res.index[-1]: continue
-                current_code = df_res.loc[start_t, '持仓']
-                current_name = df_res.loc[start_t, '持仓名称']
-                color = get_color_from_name(current_code)
-                shapes.append(dict(type="rect", xref="x", yref="paper", x0=start_t, x1=end_t, y0=0, y1=1, fillcolor=color, opacity=0.3, layer="below", line_width=0))
-                mid_point = start_t + (end_t - start_t) / 2
-                if (end_t - start_t).days > 15: 
-                    fig.add_annotation(x=mid_point, y=0.05, xref="x", yref="paper", text=current_name.split(' ')[0], showarrow=False, font=dict(size=10, color="gray"), opacity=0.7)
-            except Exception: pass
-        fig.update_layout(shapes=shapes, height=600, title_text="策略综合分析", hovermode="x unified", xaxis=dict(rangeslider=dict(visible=False), type="date"))
+        for _, row in grp_data.iterrows():
+            d_start = row['index']['first']
+            d_end = row['index']['last']
+            asset_name = row['持仓']['first']
+            color = get_color_from_name(asset_name)
+            
+            # Extend end date slightly to close gaps visually
+            d_end_adj = d_end + timedelta(hours=12)
+            
+            fig.add_vrect(
+                x0=d_start, x1=d_end_adj, 
+                fillcolor=color, opacity=0.4, 
+                layer="below", line_width=0,
+                row=1, col=1
+            )
+
+        fig.add_trace(go.Scatter(x=df_res.index, y=drawdown, name="回撤", fill='tozeroy', line=dict(color='#e74c3c', width=1)), row=2, col=1)
+        
+        fig.update_layout(height=600, margin=dict(l=20, r=20, t=20, b=20), hovermode='x unified')
         st.plotly_chart(fig, use_container_width=True)
-        
+
     with tab2:
-        res_y = []
-        years = df_res.index.year.unique()
-        for y in years:
-            d_sub = df_res[df_res.index.year == y]
-            if d_sub.empty: continue
-            y_ret = d_sub['策略净值'].iloc[-1] / d_sub['策略净值'].iloc[0] - 1
-            b_ret = bm_curve.loc[d_sub.index[-1]] / bm_curve.loc[d_sub.index[0]] - 1
-            res_y.append({"年份": y, "策略收益": y_ret, "基准收益": b_ret, "超额(Alpha)": y_ret - b_ret})
-        st.caption("📅 年度盈亏")
-        st.dataframe(pd.DataFrame(res_y).set_index("年份").style.format("{:+.2%}").background_gradient(subset=["超额(Alpha)"], cmap="RdYlGn", vmin=-0.2, vmax=0.2), use_container_width=True)
+        # Monthly Returns Table
+        m_ret = df_res['策略净值'].resample('ME').last().pct_change()
+        m_ret_df = pd.DataFrame({'Return': m_ret})
+        m_ret_df['Year'] = m_ret_df.index.year
+        m_ret_df['Month'] = m_ret_df.index.month
         
-        st.caption("🗓️ 月度盈亏矩阵")
-        df_nav = df_res['策略净值'].resample('ME').last()
-        monthly_rets = df_nav.pct_change().fillna(0)
-        monthly_data = []
-        for date, val in monthly_rets.items():
-            monthly_data.append({'Year': date.year, 'Month': date.month, 'Return': val})
-        df_month = pd.DataFrame(monthly_data)
-        pivot_month = df_month.pivot(index='Year', columns='Month', values='Return')
-        for m in range(1, 13):
-            if m not in pivot_month.columns: pivot_month[m] = np.nan
-        pivot_month = pivot_month.sort_index(ascending=False).sort_index(axis=1)
-        fig_m = px.imshow(pivot_month, labels=dict(x="月份", y="年份", color="收益率"), x=[f"{i}月" for i in range(1, 13)], color_continuous_scale="RdYlGn", color_continuous_midpoint=0.0, text_auto=".1%")
-        fig_m.update_layout(height=400)
-        st.plotly_chart(fig_m, use_container_width=True)
+        pivot_table = m_ret_df.pivot(index='Year', columns='Month', values='Return')
+        pivot_table.columns = [f"{i}月" for i in range(1, 13)]
+        pivot_table['年度'] = (1 + pivot_table).prod(axis=1) - 1
+        
+        st.dataframe(pivot_table.style.format("{:.2%}"), use_container_width=True)
 
     with tab3:
-        st.markdown("##### 📝 详细交易日记 (Heatmap Mode)")
-        df_details = pd.DataFrame(daily_details)
-        if not df_details.empty:
-            df_details['段内收益'] = df_details['段内收益'] * 100
-            
-            asset_cols = sorted([col for col in df_details.columns if col not in ["日期", "当前持仓", "持仓天数", "段内收益", "操作", "总资产", "全市场表现"]])
-            
-            for ac in asset_cols:
-                df_details[ac] = df_details[ac] * 100
-            
-            col_config = {
-                "持仓天数": st.column_config.NumberColumn("持仓天数", help="当前连续持仓天数"),
-                "段内收益": st.column_config.NumberColumn("段内收益", help="本段持仓期间的累计收益率", format="%.2f%%"),
-                "操作": st.column_config.TextColumn("调仓操作", width="medium"),
-                "总资产": st.column_config.NumberColumn("总资产", format="%.2f"),
-                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
-            }
-            
-            for ac in asset_cols:
-                col_config[ac] = st.column_config.NumberColumn(ac, format="%.2f%%")
-
-            final_cols = ["日期"] + asset_cols + ["当前持仓", "持仓天数", "段内收益", "总资产", "操作"]
-            df_show = df_details[final_cols]
-
-            st.dataframe(
-                df_show.sort_values(by="日期", ascending=False).style
-                .format({ac: "{:+.2f}" for ac in asset_cols}) 
-                .background_gradient(subset=asset_cols, cmap="RdYlGn_r", vmin=-3.0, vmax=3.0), 
-                use_container_width=True,
-                column_config=col_config
-            )
+        st.dataframe(pd.DataFrame(daily_details), use_container_width=True)
 
 if __name__ == "__main__":
     main()
