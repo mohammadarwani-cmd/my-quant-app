@@ -938,6 +938,11 @@ def main():
                 row=1, col=1
             )
 
+        # Calculate drawdown for the plot
+        nav = df_res['策略净值']
+        cummax = nav.cummax()
+        drawdown = (nav - cummax) / cummax
+
         fig.add_trace(go.Scatter(x=df_res.index, y=drawdown, name="回撤", fill='tozeroy', line=dict(color='#e74c3c', width=1)), row=2, col=1)
         
         fig.update_layout(height=600, margin=dict(l=20, r=20, t=20, b=20), hovermode='x unified')
