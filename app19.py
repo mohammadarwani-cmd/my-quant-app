@@ -913,6 +913,10 @@ def main():
         
         # Optimize filling: group by consecutive holdings
         df_res['hold_grp'] = (df_res['持仓'] != df_res['持仓'].shift()).cumsum()
+        
+        # [Fix] Ensure index is named 'index' for the aggregation below
+        df_res.index.name = 'index'
+        
         grp_data = df_res.reset_index().groupby('hold_grp').agg({
             'index': ['first', 'last'],
             '持仓': 'first'
