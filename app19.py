@@ -11,7 +11,7 @@ import json
 import os
 import hashlib
 
-# Safety import for scipy
+# Safe import for scipy
 try:
     from scipy import stats
     HAS_SCIPY = True
@@ -19,10 +19,11 @@ except ImportError:
     HAS_SCIPY = False
 
 # ==========================================
-# 0. Configuration Persistence
+# 0. Config Persistence
 # ==========================================
 CONFIG_FILE = 'strategy_config.json'
 
+# Default Asset Pool
 DEFAULT_CODES = ["518880", "588000", "513100", "510180"]
 
 DEFAULT_PARAMS = {
@@ -36,6 +37,7 @@ DEFAULT_PARAMS = {
 }
 
 def load_config():
+    """Load config from local file"""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
@@ -48,6 +50,7 @@ def load_config():
     return DEFAULT_PARAMS.copy()
 
 def save_config(config):
+    """Save config to local file"""
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f)
@@ -55,7 +58,7 @@ def save_config(config):
         pass
 
 # ==========================================
-# 1. UI Configuration & CSS
+# 1. Page Config & CSS
 # ==========================================
 st.set_page_config(
     page_title="AlphaTarget | 核心资产轮动策略终端",
@@ -66,44 +69,139 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .stApp { background-color: #f4f6f9; font-family: 'Segoe UI', sans-serif; }
-    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e0e0e0; }
+    /* Global Background & Font */
+    .stApp {
+        background-color: #f4f6f9;
+        font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif;
+    }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background-color: #ffffff;
+        border-right: 1px solid #e0e0e0;
+    }
+
+    /* Metric Card */
     .metric-card {
-        background-color: #ffffff; border: 1px solid #eaeaea; border-radius: 12px;
-        padding: 20px 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        text-align: center; transition: all 0.3s ease; height: 100%;
+        background-color: #ffffff;
+        border: 1px solid #eaeaea;
+        border-radius: 12px;
+        padding: 20px 15px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        text-align: center;
+        transition: all 0.3s ease;
+        height: 100%;
     }
-    .metric-card:hover { transform: translateY(-3px); box-shadow: 0 8px 16px rgba(0,0,0,0.08); }
-    .metric-label { color: #7f8c8d; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; margin-bottom: 8px; }
-    .metric-value { color: #2c3e50; font-size: 1.6rem; font-weight: 700; }
+    .metric-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 8px 16px rgba(0,0,0,0.08);
+        border-color: #d0d0d0;
+    }
+    .metric-label {
+        color: #7f8c8d;
+        font-size: 0.85rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 8px;
+    }
+    .metric-value {
+        color: #2c3e50;
+        font-size: 1.6rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .metric-sub {
+        font-size: 0.8rem;
+        color: #95a5a6;
+        margin-top: 6px;
+    }
+
+    /* Signal Banner */
     .signal-banner {
-        padding: 25px; border-radius: 12px; margin-bottom: 25px; color: white;
+        padding: 25px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+        color: white;
         background: linear-gradient(135deg, #2c3e50 0%, #4ca1af 100%);
+        box-shadow: 0 4px 15px rgba(44, 62, 80, 0.3);
+        position: relative;
+        overflow: hidden;
     }
-    .total-asset-header { font-size: 2.2rem; font-weight: 800; color: #2c3e50; }
-    .opt-highlight { background-color: #e8f4f8; border-left: 4px solid #3498db; padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+    
+    /* Table Styling */
+    .dataframe {
+        font-size: 13px !important;
+        border: 1px solid #eee;
+    }
+    
+    /* Total Asset Header */
+    .total-asset-header {
+        font-size: 2.2rem;
+        font-weight: 800;
+        color: #2c3e50;
+        margin-bottom: 0.2rem;
+        font-family: 'Arial', sans-serif;
+    }
+    .total-asset-sub {
+        font-size: 1.1rem;
+        color: #7f8c8d;
+        font-weight: 500;
+    }
+    
+    /* Headers */
+    h1, h2, h3 {
+        color: #2c3e50;
+        font-weight: 600;
+    }
+    
+    /* Optimizer Highlight */
+    .opt-highlight {
+        background-color: #e8f4f8;
+        border-left: 4px solid #3498db;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-TRANSACTION_COST = 0.0001
+TRANSACTION_COST = 0.0001  # 1/10000
+
 PRESET_ETFS = {
-    "518880": "黄金ETF", "588000": "科创50", "513100": "纳指100",
-    "510180": "上证180", "159915": "创业板指", "510300": "沪深300"
+    "518880": "黄金ETF (避险)", "588000": "科创50 (硬科技)", "513100": "纳指100 (海外)",
+    "510180": "上证180 (蓝筹)", "159915": "创业板指 (成长)", "510300": "沪深300 (大盘)",
+    "510500": "中证500 (中盘)", "512890": "红利低波 (防御)", "513500": "标普500 (美股)",
+    "512480": "半导体ETF (行业)", "512880": "证券ETF (Beta)"
 }
+
+def get_color_from_name(name):
+    if name == 'Cash':
+        return 'rgba(200, 200, 200, 0.2)' 
+    hash_obj = hashlib.md5(name.encode())
+    hex_dig = hash_obj.hexdigest()
+    r = int(hex_dig[0:2], 16)
+    g = int(hex_dig[2:4], 16)
+    b = int(hex_dig[4:6], 16)
+    r = (r + 255) // 2
+    g = (g + 255) // 2
+    b = (b + 255) // 2
+    return f'rgba({r}, {g}, {b}, 0.25)' 
 
 def metric_html(label, value, sub="", color="#2c3e50"):
     return f"""
     <div class="metric-card">
         <div class="metric-label">{label}</div>
         <div class="metric-value" style="color:{color}">{value}</div>
-        <div style="font-size: 0.8rem; color: #95a5a6; margin-top: 6px;">{sub}</div>
+        <div class="metric-sub">{sub}</div>
     </div>
     """
 
 # ==========================================
-# 2. Data Layer
+# 2. Data Layer - Pure Historical Data
 # ==========================================
-@st.cache_data(ttl=43200)
+
+@st.cache_data(ttl=3600*12) 
 def get_all_etf_list():
     try:
         df = ak.fund_etf_spot_em()
@@ -112,38 +210,52 @@ def get_all_etf_list():
     except:
         return pd.DataFrame()
 
-@st.cache_data(ttl=14400)
+@st.cache_data(ttl=3600*4)
 def download_market_data(codes_list, end_date_str):
-    start_str = '20150101'
+    """
+    Pure historical data download, no real-time fusion
+    """
+    start_str = '20150101' 
     price_dict = {}
     name_map = {}
+    
     etf_list = get_all_etf_list()
     
     for code in codes_list:
         name = code
         if code in PRESET_ETFS:
-            name = PRESET_ETFS[code]
+            name = PRESET_ETFS[code].split(" ")[0]
         elif not etf_list.empty:
             match = etf_list[etf_list['代码'] == code]
-            if not match.empty: name = match.iloc[0]['名称']
+            if not match.empty:
+                name = match.iloc[0]['名称']
         name_map[code] = name
+        
         try:
             df = ak.fund_etf_hist_em(symbol=code, period="daily", start_date=start_str, end_date=end_date_str, adjust="qfq")
             if not df.empty:
                 df['日期'] = pd.to_datetime(df['日期'])
                 df.set_index('日期', inplace=True)
                 price_dict[name] = df['收盘'].astype(float)
-        except: continue
+        except Exception:
+            continue
 
-    if not price_dict: return None, None
-    data = pd.concat(price_dict, axis=1).sort_index().ffill().dropna(how='all')
+    if not price_dict:
+        return None, None
+
+    data = pd.concat(price_dict, axis=1).sort_index().ffill()
+    data.dropna(how='all', inplace=True)
+    if len(data) < 20: return None, None
     return data, name_map
 
 # ==========================================
 # 3. Strategy Core
 # ==========================================
-def calculate_momentum(data, lookback, smooth, method):
-    if method == 'Risk-Adjusted (稳健)':
+
+def calculate_momentum(data, lookback, smooth, method='Classic (普通)'):
+    if method == 'Classic (普通)':
+        mom = data.pct_change(lookback)
+    elif method == 'Risk-Adjusted (稳健)':
         ret = data.pct_change(lookback)
         vol = data.pct_change().rolling(lookback).std()
         mom = ret / (vol + 1e-9)
@@ -152,8 +264,11 @@ def calculate_momentum(data, lookback, smooth, method):
         mom = (data / ma) - 1
     else:
         mom = data.pct_change(lookback)
-    
-    return mom.rolling(smooth).mean() if smooth > 1 else mom
+
+    if smooth > 1:
+        mom = mom.rolling(smooth).mean()
+        
+    return mom
 
 def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_rate=0.0001, allow_cash=True):
     signal_mom = mom_df.shift(1)
@@ -167,11 +282,13 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
     days_held = 0 
     
     for i in range(n_days):
-        if curr_idx != -2: days_held += 1
+        if curr_idx != -2:
+            days_held += 1
+            
         row_mom = p_mom[i]
         if np.isnan(row_mom).all(): continue
             
-        clean_mom = np.nan_to_num(row_mom, nan=-999)
+        clean_mom = np.nan_to_num(row_mom, nan=-np.inf)
         best_idx = np.argmax(clean_mom)
         best_val = clean_mom[best_idx]
         target_idx = curr_idx
@@ -179,84 +296,600 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
         if allow_cash and best_val < 0:
             target_idx = -1
         else:
-            if curr_idx < 0:
-                target_idx = best_idx
-            elif days_held >= min_holding:
-                if best_idx != curr_idx and best_val > clean_mom[curr_idx] + threshold:
-                    target_idx = best_idx
+            if curr_idx == -2:
+                if best_val > -np.inf: target_idx = best_idx
+            elif curr_idx == -1:
+                if best_val > 0 or (not allow_cash): target_idx = best_idx
+            else:
+                is_stop_loss = (target_idx == -1) 
+                if not is_stop_loss:
+                    if days_held >= min_holding:
+                        curr_val = clean_mom[curr_idx]
+                        if best_idx != curr_idx:
+                            if best_val > curr_val + threshold:
+                                target_idx = best_idx
+                    else:
+                        target_idx = curr_idx
         
         if target_idx != curr_idx:
             if curr_idx != -2:
                 strategy_ret[i] -= cost_rate
                 trade_count += 1
-            curr_idx, days_held = target_idx, 0
+                days_held = 0
+            curr_idx = target_idx
             
-        if curr_idx >= 0: strategy_ret[i] += p_ret[i, curr_idx]
+        if curr_idx >= 0:
+            strategy_ret[i] += p_ret[i, curr_idx]
             
-    return (1 + strategy_ret).cumprod(), trade_count
+    equity_curve = (1 + strategy_ret).cumprod()
+    total_ret = equity_curve[-1] - 1
+    cummax = np.maximum.accumulate(equity_curve)
+    drawdown = (equity_curve - cummax) / cummax
+    max_dd = drawdown.min()
+    return total_ret, max_dd, equity_curve, trade_count
 
 # ==========================================
-# 4. Main Application
+# 4. Analyst Toolbox
 # ==========================================
-def main():
-    if 'params' not in st.session_state: st.session_state.params = load_config()
+
+def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
+    if len(equity_curve) < 2: return {}
+    s_eq = pd.Series(equity_curve)
+    daily_ret = s_eq.pct_change().fillna(0)
+    days = len(equity_curve)
     
+    total_ret = equity_curve[-1] - 1
+    ann_ret = (1 + total_ret) ** (252 / days) - 1
+    ann_vol = daily_ret.std() * np.sqrt(252)
+    rf = 0.03
+    sharpe = (ann_ret - rf) / (ann_vol + 1e-9)
+    
+    cummax = np.maximum.accumulate(equity_curve)
+    drawdown = (equity_curve - cummax) / cummax
+    max_dd = drawdown.min()
+    calmar = ann_ret / (abs(max_dd) + 1e-9)
+    
+    beta, alpha = 0.0, 0.0
+    if HAS_SCIPY and len(benchmark_curve) == len(equity_curve):
+        s_bm = pd.Series(benchmark_curve)
+        bm_ret = s_bm.pct_change().fillna(0)
+        try:
+            slope, intercept, _, _, _ = stats.linregress(bm_ret.values[1:], daily_ret.values[1:])
+            beta = slope
+            alpha = intercept * 252
+        except: pass
+            
+    return {
+        "Total Return": total_ret, "CAGR": ann_ret, "Volatility": ann_vol,
+        "Max Drawdown": max_dd, "Sharpe Ratio": sharpe, "Calmar Ratio": calmar,
+        "Alpha": alpha, "Beta": beta, "Trades": trade_count
+    }
+
+def optimize_parameters(data, allow_cash, min_holding):
+    methods = ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)']
+    lookbacks = range(20, 31, 1) 
+    smooths = range(1, 8, 1)      
+    thresholds = np.arange(0.0, 0.013, 0.001)
+    
+    daily_ret = data.pct_change().fillna(0)
+    n_days = len(daily_ret) 
+    results = []
+    
+    total_iters = len(methods) * len(lookbacks) * len(smooths) * len(thresholds)
+    my_bar = st.progress(0, text="正在进行四维全景扫描 (Method/Loop/Smooth/Th)...")
+    
+    idx = 0
+    for method in methods:
+        for lb in lookbacks:
+            for sm in smooths:
+                mom = calculate_momentum(data, lb, sm, method)
+                for th in thresholds:
+                    ret, dd, equity, count = fast_backtest_vectorized(
+                        daily_ret, mom, th, 
+                        min_holding=min_holding,
+                        cost_rate=TRANSACTION_COST, 
+                        allow_cash=allow_cash
+                    )
+                    
+                    ann_ret = (1 + ret) ** (252 / n_days) - 1
+                    if n_days > 1:
+                        eq_s = pd.Series(equity)
+                        d_r = eq_s.pct_change().fillna(0)
+                        ann_vol = d_r.std() * np.sqrt(252)
+                        sharpe = (ann_ret - 0.03) / (ann_vol + 1e-9)
+                    else:
+                        sharpe = 0.0
+                    
+                    ann_trades = count * (252 / n_days)
+                    score = ret / (abs(dd) + 0.05)
+                    
+                    results.append([method, lb, sm, th, ret, ann_ret, count, ann_trades, dd, sharpe, score])
+                    
+                    idx += 1
+                    if idx % 200 == 0:
+                        my_bar.progress(min(idx / total_iters, 1.0))
+                    
+    my_bar.empty()
+    df_res = pd.DataFrame(results, columns=['方法', '周期', '平滑', '阈值', '累计收益', '年化收益', '调仓次数', '年化调仓', '最大回撤', '夏普比率', '得分'])
+    return df_res
+
+# ==========================================
+# 5. Main UI
+# ==========================================
+
+def main():
+    if 'params' not in st.session_state:
+        saved_config = load_config()
+        st.session_state.params = saved_config
+
+    if 'opt_results' not in st.session_state:
+        st.session_state.opt_results = None
+
     with st.sidebar:
         st.title("🎛️ 策略控制台")
+        
+        # --- 1. Assets & Data ---
+        st.subheader("1. 资产池配置")
         all_etfs = get_all_etf_list()
         options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
-        selected_display = st.multiselect("核心标的池", options, default=options[:4])
+        current_selection_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
+        
+        default_display = []
+        if not all_etfs.empty:
+            for code in current_selection_codes:
+                match = all_etfs[all_etfs['代码'] == code]
+                if not match.empty:
+                    default_display.append(match.iloc[0]['display'])
+                else:
+                    for opt in options:
+                        if opt.startswith(code):
+                            default_display.append(opt)
+                            break
+        else:
+            default_display = current_selection_codes
+            
+        valid_defaults = [x for x in default_display if x in options]
+        selected_display = st.multiselect("核心标的池", options, default=valid_defaults)
         selected_codes = [x.split(" | ")[0] for x in selected_display]
         
         st.divider()
-        start_date_input = st.date_input("开始日期", datetime(2021, 1, 1))
-        initial_capital = st.number_input("初始本金", value=100000.0)
+        st.subheader("2. 资金管理")
         
-        with st.form("settings"):
-            p_method = st.selectbox("动量逻辑", ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)'], index=1)
-            p_lookback = st.slider("周期", 5, 60, 25)
-            p_smooth = st.slider("平滑", 1, 10, 3)
-            p_threshold = st.number_input("换仓阈值", 0.0, 0.05, 0.005, step=0.001, format="%.3f")
-            p_min_holding = st.number_input("最小持仓天数", 1, 20, 3)
-            p_allow_cash = st.checkbox("启用避险", True)
-            run = st.form_submit_button("🚀 运行回测")
+        date_mode = st.radio("回测区间", ["全历史", "自定义"], index=0)
+        
+        # Default start date 2021-01-01
+        start_date_input = datetime(2021, 1, 1)
+        end_date_input = datetime.now()
+        
+        if date_mode == "自定义":
+            c1, c2 = st.columns(2)
+            start_date_input = c1.date_input("Start", datetime(2021, 1, 1))
+            end_date_input = c2.date_input("End", datetime.now())
 
-    st.markdown("## 🚀 核心资产轮动策略终端")
+        invest_mode = st.radio("投资模式", ["一次性投入 (Lump Sum)", "定期定额 (SIP)"], index=0)
+        
+        initial_capital = 100000.0
+        sip_amount = 0.0
+        sip_freq = "None"
+        
+        if invest_mode == "一次性投入 (Lump Sum)":
+            initial_capital = st.number_input("初始本金", value=100000.0, step=10000.0)
+        else:
+            c1, c2 = st.columns(2)
+            initial_capital = c1.number_input("初始底仓", value=10000.0, step=1000.0)
+            sip_amount = c2.number_input("定投金额", value=2000.0, step=500.0)
+            sip_freq = st.selectbox("定投频率", ["每月 (Monthly)", "每周 (Weekly)"], index=0)
+
+        st.divider()
+        
+        # --- 3. Strategy Params ---
+        with st.form(key='settings_form'):
+            st.subheader("3. 策略内核参数")
+            
+            mom_options = ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)']
+            default_mom = st.session_state.params.get('mom_method', 'Risk-Adjusted (稳健)')
+            if default_mom not in mom_options: default_mom = 'Classic (普通)'
+            
+            p_method = st.selectbox("动量计算逻辑", mom_options, index=mom_options.index(default_mom))
+            
+            c_p1, c_p2 = st.columns(2)
+            with c_p1:
+                p_lookback = st.number_input("动量周期", min_value=2, max_value=120, value=st.session_state.params.get('lookback', 25), step=1)
+            with c_p2:
+                p_smooth = st.number_input("平滑窗口", min_value=1, max_value=60, value=st.session_state.params.get('smooth', 3), step=1)
+                
+            p_threshold = st.number_input("换仓阈值", 0.0, 0.05, st.session_state.params.get('threshold', 0.005), step=0.001, format="%.3f")
+            
+            st.markdown("---")
+            st.markdown("**🛑 风控参数**")
+            p_min_holding = st.number_input("最小持仓天数", min_value=1, max_value=60, value=st.session_state.params.get('min_holding', 3), step=1)
+            p_allow_cash = st.checkbox("启用绝对动量避险 (Cash Protection)", value=st.session_state.params.get('allow_cash', True))
+            
+            submit_btn = st.form_submit_button("🚀 确认并运行 (Run Analysis)")
+
+        if submit_btn:
+            current_params = {
+                'lookback': p_lookback, 'smooth': p_smooth, 'threshold': p_threshold,
+                'min_holding': p_min_holding, 'allow_cash': p_allow_cash, 'selected_codes': selected_codes,
+                'mom_method': p_method 
+            }
+            if current_params != st.session_state.params:
+                st.session_state.params = current_params
+                save_config(current_params)
+        
+        if st.button("🔄 重置默认配置"):
+            st.session_state.params = DEFAULT_PARAMS.copy()
+            save_config(DEFAULT_PARAMS)
+            st.rerun()
+
+    # Date Logic
+    start_date = datetime.combine(start_date_input, datetime.min.time()) if isinstance(start_date_input, datetime) == False else start_date_input
+    end_date = datetime.combine(end_date_input, datetime.min.time()) if isinstance(end_date_input, datetime) == False else end_date_input
+    if not isinstance(start_date, datetime): start_date = datetime.combine(start_date, datetime.min.time())
+    if not isinstance(end_date, datetime): end_date = datetime.combine(end_date, datetime.min.time())
+
+    st.markdown("## 🚀 核心资产轮动策略终端 (Pro Ver.)")
     
     if not selected_codes:
-        st.info("请在左侧选择资产标的。")
-        return
+        st.warning("请选择标的。")
+        st.stop()
+        
+    with st.spinner("正在加载历史行情数据 (Historical Data Only)..."):
+        raw_data, name_map = download_market_data(selected_codes, end_date.strftime('%Y%m%d'))
+        
+    if raw_data is None:
+        st.error("数据不足或下载失败。")
+        st.stop()
 
-    raw_data, name_map = download_market_data(selected_codes, datetime.now().strftime('%Y%m%d'))
-    if raw_data is None: return
-
-    # Processing
-    mom_all = calculate_momentum(raw_data, p_lookback, p_smooth, p_method)
-    mask = raw_data.index >= pd.Timestamp(start_date_input)
-    sliced_data, sliced_mom = raw_data[mask], mom_all[mask]
-    daily_ret = sliced_data.pct_change().fillna(0)
+    daily_ret_all = raw_data.pct_change().fillna(0)
+    mom_method_curr = st.session_state.params.get('mom_method', 'Classic (普通)')
+    mom_all = calculate_momentum(raw_data, p_lookback, p_smooth, mom_method_curr)
     
-    nav, trades = fast_backtest_vectorized(daily_ret, sliced_mom, p_threshold, p_min_holding, TRANSACTION_COST, p_allow_cash)
+    mask = (raw_data.index >= start_date) & (raw_data.index <= end_date)
+    sliced_data = raw_data.loc[mask]
+    sliced_mom = mom_all.loc[mask] 
+    sliced_ret = daily_ret_all.loc[mask]
     
-    # Results
-    total_ret = nav[-1] - 1
-    max_dd = ((nav - np.maximum.accumulate(nav)) / np.maximum.accumulate(nav)).min()
+    if sliced_data.empty:
+        st.error("区间内无数据")
+        st.stop()
+
+    signal_mom = sliced_mom.shift(1)
+    dates = sliced_ret.index
     
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(metric_html("累计收益", f"{total_ret:.2%}", color="#c0392b"), unsafe_allow_html=True)
-    c2.markdown(metric_html("最大回撤", f"{max_dd:.2%}", color="#27ae60"), unsafe_allow_html=True)
-    c3.markdown(metric_html("交易次数", f"{trades}次"), unsafe_allow_html=True)
-    c4.markdown(metric_html("当前状态", name_map.get(sliced_mom.iloc[-1].idxmax(), "Cash") if not (p_allow_cash and sliced_mom.iloc[-1].max() < 0) else "空仓"), unsafe_allow_html=True)
+    # === Backtest Loop ===
+    cash = initial_capital
+    share_val = 0.0
+    curr_hold = None
+    days_held = 0
+    current_hold_start_val = 0.0 
+    
+    holdings_history = []
+    total_assets_curve = []
+    total_invested_curve = []
+    total_invested = initial_capital
+    trade_count_real = 0
+    daily_details = [] 
+    last_sip_date = dates[0]
+    
+    for i, date in enumerate(dates):
+        r_today = sliced_ret.loc[date]
+        
+        # A. SIP
+        if invest_mode == "定期定额 (SIP)" and i > 0:
+            is_sip_day = False
+            if sip_freq.startswith("每月"):
+                if date.month != last_sip_date.month: is_sip_day = True
+            elif sip_freq.startswith("每周"):
+                if date.weekday() == 0 and last_sip_date.weekday() != 0: is_sip_day = True
+            
+            if is_sip_day:
+                cash += sip_amount
+                total_invested += sip_amount
+                last_sip_date = date
 
-    # Charting
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=sliced_data.index, y=nav, name="策略净值", line=dict(color='#c0392b', width=2.5)))
-    bm = (1 + daily_ret.mean(axis=1)).cumprod()
-    fig.add_trace(go.Scatter(x=sliced_data.index, y=bm, name="等权基准", line=dict(color='#95a5a6', dash='dash')))
-    fig.update_layout(template="plotly_white", hovermode="x unified", height=500, margin=dict(t=30, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+        # B. Signal
+        if curr_hold is not None: days_held += 1
+        row = signal_mom.loc[date]
+        target = curr_hold
+        
+        if not row.isna().all():
+            clean_row = row.fillna(-np.inf)
+            best_asset = clean_row.idxmax()
+            best_score = clean_row.max()
+            
+            if p_allow_cash and best_score < 0:
+                target = 'Cash'
+            else:
+                if curr_hold is None or curr_hold == 'Cash':
+                    target = best_asset
+                else:
+                    if days_held >= p_min_holding:
+                        curr_score = clean_row.get(curr_hold, -np.inf)
+                        if best_asset != curr_hold:
+                            if best_score > curr_score + p_threshold: target = best_asset
+                    else:
+                        target = curr_hold
 
-    st.dataframe(sliced_data.tail(10).style.format("{:.3f}"), use_container_width=True)
+        day_return = 0.0
+        if curr_hold and curr_hold != 'Cash' and curr_hold in r_today:
+            day_return = r_today[curr_hold]
+        
+        share_val = share_val * (1 + day_return)
+        
+        temp_segment_ret = 0.0
+        if curr_hold and curr_hold != 'Cash' and current_hold_start_val > 0:
+            temp_segment_ret = (share_val / current_hold_start_val) - 1
+            
+        log_hold = curr_hold
+        log_days = days_held
+        log_ret = temp_segment_ret
+        note = ""
+
+        # Trade Execution
+        if target != curr_hold:
+            if curr_hold is not None:
+                total_equity = share_val + cash
+                cost = total_equity * TRANSACTION_COST
+                if cash >= cost: cash -= cost
+                else: share_val -= cost
+                trade_count_real += 1
+                days_held = 0
+                
+                old_name = name_map.get(curr_hold, curr_hold) if curr_hold else "Cash"
+                new_name = name_map.get(target, target) if target else "Cash"
+                note = f"调仓: {old_name} -> {new_name}"
+                
+            if target == 'Cash':
+                cash += share_val
+                share_val = 0.0
+            else:
+                total = share_val + cash
+                share_val = total
+                cash = 0.0
+                current_hold_start_val = total
+                
+            curr_hold = target
+            
+        holdings_history.append(target if target else "Cash")
+        current_total = share_val + cash
+        total_assets_curve.append(current_total)
+        total_invested_curve.append(total_invested)
+        
+        hold_name_display = name_map.get(log_hold, log_hold) if log_hold and log_hold != 'Cash' else 'Cash'
+        
+        daily_record = {
+            "日期": date.strftime('%Y-%m-%d'),
+            "当前持仓": hold_name_display,
+            "持仓天数": log_days if log_hold != 'Cash' else 0,
+            "段内收益": log_ret if log_hold != 'Cash' else 0.0,
+            "操作": note,
+            "总资产": current_total,
+        }
+        
+        for code, val in r_today.items():
+            col_name = name_map.get(code, code)
+            daily_record[col_name] = val 
+            
+        daily_details.append(daily_record)
+
+    df_res = pd.DataFrame({
+        '总资产': total_assets_curve,
+        '投入本金': total_invested_curve,
+        '持仓': holdings_history
+    }, index=dates)
+    
+    _, _, nav_series, _ = fast_backtest_vectorized(
+        sliced_ret, sliced_mom, p_threshold, 
+        min_holding=p_min_holding, cost_rate=TRANSACTION_COST, allow_cash=p_allow_cash
+    )
+    df_res['策略净值'] = nav_series
+    bm_curve = (1 + sliced_ret.mean(axis=1)).cumprod()
+    
+    # Signal Banner
+    latest_mom = mom_all.iloc[-1].dropna().sort_values(ascending=False)
+    last_hold = holdings_history[-1]
+    
+    col_sig1, col_sig2 = st.columns([2, 1])
+    with col_sig1:
+        hold_name = name_map.get(last_hold, last_hold) if last_hold != 'Cash' else '🛡️ 空仓避险 (Cash)'
+        lock_msg = f"(已持仓 {days_held} 天)" if last_hold != 'Cash' else ""
+        if days_held < p_min_holding and last_hold != 'Cash': lock_msg += " 🔒 **锁定中**"
+        
+        data_last_date = raw_data.index[-1].strftime('%Y-%m-%d')
+        
+        st.markdown(f"""
+        <div class="signal-banner">
+            <h3 style="margin:0">📌 当前持仓: {hold_name}</h3>
+            <div style="margin-top:5px; font-size: 0.9rem">
+                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg} | 数据截止: {data_last_date}
+            </div>
+        </div>""", unsafe_allow_html=True)
+        
+    with col_sig2:
+        st.markdown("**🏆 实时排名**")
+        for i, (asset, score) in enumerate(latest_mom.head(3).items()):
+            display_name = name_map.get(asset, asset)
+            st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
+
+    # === Optimizer (4D) ===
+    with st.expander("🛠️ 策略参数优化引擎 (4D Smart Optimizer)", expanded=False):
+        opt_source = st.radio(
+            "优化数据源 (Data Source for Optimization)", 
+            ["当前选定区间 (Selected Range)", "全历史数据 (Full History: 2015+)"],
+            index=0,
+            horizontal=True
+        )
+        
+        if st.button("运行全参数扫描 (Method/L/S/T)"):
+            data_to_opt = sliced_data if opt_source.startswith("当前") else raw_data
+            with st.spinner(f"正在基于 [{opt_source}] 进行四维全景扫描 (约 3000+ 次回测)..."):
+                opt_df = optimize_parameters(data_to_opt, p_allow_cash, p_min_holding)
+                st.session_state.opt_results = opt_df 
+        
+        if st.session_state.opt_results is not None:
+            opt_df = st.session_state.opt_results
+            
+            best_ret_idx = opt_df['累计收益'].idxmax()
+            best_r = opt_df.loc[best_ret_idx]
+            
+            best_sharpe_idx = opt_df['夏普比率'].idxmax()
+            best_s = opt_df.loc[best_sharpe_idx]
+            
+            df_low = opt_df[opt_df['年化调仓'] <= 20]
+            best_low = None
+            if not df_low.empty:
+                best_low = df_low.loc[df_low['夏普比率'].idxmax()] 
+            
+            def apply_params(row_data):
+                new_params = st.session_state.params.copy()
+                new_params['lookback'] = int(row_data['周期'])
+                new_params['smooth'] = int(row_data['平滑'])
+                new_params['threshold'] = float(row_data['阈值'])
+                new_params['mom_method'] = row_data['方法']
+                st.session_state.params = new_params
+                save_config(new_params)
+                st.toast("✅ 参数已更新并保存！正在重新回测...", icon="💾")
+                time.sleep(1)
+                st.rerun()
+
+            c1, c2, c3 = st.columns(3)
+            def short_method(m): return m.split(" ")[0]
+
+            is_same = (best_r['方法'] == best_s['方法'] and int(best_r['周期']) == int(best_s['周期']) and int(best_r['平滑']) == int(best_s['平滑']) and best_r['阈值'] == best_s['阈值'])
+            note_str = " (参数重合)" if is_same else ""
+
+            with c1:
+                st.markdown(f'<div class="opt-highlight">🔥 <b>收益优先</b>{note_str}</div>', unsafe_allow_html=True)
+                p_str = f"{short_method(best_r['方法'])}/L{int(best_r['周期'])}/S{int(best_r['平滑'])}/T{best_r['阈值']:.3f}"
+                st.write(f"**年化:** `{best_r['年化收益']:.1%}`")
+                st.write(f"**夏普:** `{best_r['夏普比率']:.2f}`")
+                st.write(f"**调仓:** `{best_r['年化调仓']:.1f}次/年`")
+                st.caption(f"配置: {p_str}")
+                if st.button("💾 应用 (收益)", key="btn_apply_ret"):
+                    apply_params(best_r)
+
+            with c2:
+                st.markdown(f'<div class="opt-highlight">💎 <b>夏普优先</b>{note_str}</div>', unsafe_allow_html=True)
+                p_str_s = f"{short_method(best_s['方法'])}/L{int(best_s['周期'])}/S{int(best_s['平滑'])}/T{best_s['阈值']:.3f}"
+                st.write(f"**年化:** `{best_s['年化收益']:.1%}`")
+                st.write(f"**夏普:** `{best_s['夏普比率']:.2f}`")
+                st.write(f"**调仓:** `{best_s['年化调仓']:.1f}次/年`")
+                st.caption(f"配置: {p_str_s}")
+                if not is_same: 
+                    if st.button("💾 应用 (夏普)", key="btn_apply_sharpe"):
+                        apply_params(best_s)
+                else:
+                    st.caption("与左侧参数一致")
+                    
+            with c3:
+                st.markdown('<div class="opt-highlight">🐢 <b>最佳低频 (<20次/年)</b></div>', unsafe_allow_html=True)
+                if best_low is not None:
+                    p_str_l = f"{short_method(best_low['方法'])}/L{int(best_low['周期'])}/S{int(best_low['平滑'])}/T{best_low['阈值']:.3f}"
+                    st.write(f"**年化:** `{best_low['年化收益']:.1%}`")
+                    st.write(f"**夏普:** `{best_low['夏普比率']:.2f}`")
+                    st.write(f"**调仓:** `{best_low['年化调仓']:.1f}次/年`")
+                    st.caption(f"配置: {p_str_l}")
+                    if st.button("💾 应用 (低频)", key="btn_apply_low"):
+                        apply_params(best_low)
+                else:
+                    st.warning("无满足条件的组合")
+
+            st.caption("🌌 参数空间映射 (X:周期, Y:阈值, Color:年化调仓) [已展示全部方法]")
+            fig_3d = px.scatter_3d(
+                opt_df, 
+                x='周期', y='阈值', z='平滑',
+                color='年化调仓', 
+                color_continuous_scale='Turbo',
+                symbol='方法', 
+                hover_data=['年化收益', '最大回撤', '夏普比率', '方法'],
+                opacity=0.8
+            )
+            fig_3d.update_layout(margin=dict(l=0, r=0, b=0, t=0), height=300)
+            st.plotly_chart(fig_3d, use_container_width=True)
+
+    # Reporting
+    account_ret = df_res['总资产'].iloc[-1] / df_res['投入本金'].iloc[-1] - 1
+    account_profit = df_res['总资产'].iloc[-1] - df_res['投入本金'].iloc[-1]
+    metrics = calculate_pro_metrics(df_res['策略净值'].values, bm_curve.values, trade_count_real)
+    
+    st.markdown(f"""
+    <div style="margin-bottom: 20px;">
+        <div class="total-asset-header">¥{df_res['总资产'].iloc[-1]:,.0f}</div>
+        <div class="total-asset-sub">投入本金: ¥{df_res['投入本金'].iloc[-1]:,.0f} | <span style="color: {'#d62728' if account_profit > 0 else 'green'}">总盈亏: {account_profit:+,.0f} ({account_ret:+.2%})</span></div>
+    </div>""", unsafe_allow_html=True)
+    
+    six_months_ago = df_res.index[-1] - timedelta(days=180)
+    idx_6m = df_res.index.searchsorted(six_months_ago)
+    if idx_6m < len(df_res):
+        ret_6m = df_res['策略净值'].iloc[-1] / df_res['策略净值'].iloc[idx_6m] - 1
+        bm_ret_6m = bm_curve.iloc[-1] / bm_curve.iloc[idx_6m] - 1
+    else: ret_6m = 0.0; bm_ret_6m = 0.0
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    with m1: st.markdown(metric_html("累计收益", f"{metrics.get('Total Return',0):.1%}", "", "#c0392b"), unsafe_allow_html=True)
+    with m2: st.markdown(metric_html("年化收益", f"{metrics.get('CAGR',0):.1%}", "", "#c0392b"), unsafe_allow_html=True)
+    with m3: st.markdown(metric_html("近半年收益", f"{ret_6m:.1%}", f"超额: {ret_6m - bm_ret_6m:+.1%}", "#2980b9"), unsafe_allow_html=True)
+    with m4: st.markdown(metric_html("最大回撤", f"{metrics.get('Max Drawdown',0):.1%}", "", "#27ae60"), unsafe_allow_html=True)
+    with m5: st.markdown(metric_html("夏普比率", f"{metrics.get('Sharpe Ratio',0):.2f}", "", "#2c3e50"), unsafe_allow_html=True)
+    with m6: st.markdown(metric_html("交易次数", f"{trade_count_real}", "", "#2c3e50"), unsafe_allow_html=True)
+
+    tab1, tab2, tab3 = st.tabs(["📈 综合图表", "📅 年度/月度回报", "📝 交易日记"])
+    with tab1:
+        # Asset Overlay Selection
+        st.caption("📉 标的走势叠加 (Asset Overlays)")
+        all_assets = sliced_data.columns.tolist()
+        overlay_assets = st.multiselect(
+            "选择要对比的底层资产 (Select Assets to Compare)", 
+            options=all_assets,
+            default=[], 
+            help="选择标的后，其净值曲线将叠加显示在主图中，方便对比策略与单一资产的表现。"
+        )
+
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3], specs=[[{"secondary_y": False}], [{"secondary_y": False}]])
+        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['策略净值'], name="策略净值", line=dict(color='#c0392b', width=2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_res.index, y=bm_curve, name="基准", line=dict(color='#95a5a6', dash='dash')), row=1, col=1)
+        
+        # Add Asset Traces
+        colors = px.colors.qualitative.Plotly
+        for i, asset in enumerate(overlay_assets):
+            s = sliced_data[asset]
+            # Normalize to 1.0 at start to compare with strategy
+            if not s.empty:
+                s_norm = s / s.iloc[0]
+                color = colors[i % len(colors)]
+                fig.add_trace(go.Scatter(x=s.index, y=s_norm, name=f"{name_map.get(asset, asset)}", line=dict(color=color, width=1, dash='dot'), opacity=0.7), row=1, col=1)
+
+        # Drawdown Area
+        dd_series = (df_res['策略净值'] / df_res['策略净值'].cummax() - 1)
+        fig.add_trace(go.Scatter(x=df_res.index, y=dd_series, name="回撤", fill='tozeroy', line=dict(color='#e74c3c', width=0), opacity=0.3), row=2, col=1)
+        
+        fig.update_layout(height=600, hovermode="x unified", template="plotly_white")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        # Monthly Returns Table
+        monthly_ret = df_res['策略净值'].resample('M').last().pct_change()
+        monthly_table = monthly_ret.to_frame(name='Return')
+        monthly_table['Year'] = monthly_table.index.year
+        monthly_table['Month'] = monthly_table.index.month
+        pivot_table = monthly_table.pivot(index='Year', columns='Month', values='Return')
+        
+        # Heatmap
+        fig_heat = px.imshow(pivot_table, text_auto='.1%', color_continuous_scale='RdBu_r', midpoint=0)
+        fig_heat.update_layout(title="月度回报热力图")
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+    with tab3:
+        # Trade Log
+        df_log = pd.DataFrame(daily_details)
+        if not df_log.empty:
+            # Filter rows with operations
+            df_ops = df_log[df_log['操作'] != ""].copy()
+            st.dataframe(df_ops[['日期', '操作', '总资产', '当前持仓']], use_container_width=True)
+            
+            with st.expander("查看每日详细持仓数据"):
+                st.dataframe(df_log, use_container_width=True)
 
 if __name__ == "__main__":
     main()
